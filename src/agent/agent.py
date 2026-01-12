@@ -17,7 +17,7 @@ class Agent:
         
         self.conversation = ConversationManager(
             system_prompt=(
-                "You are a helpful assistant with access to multiple tools. "
+                "You are a helpful assistant with access to tools that can extend dynamically. "
                 "Use the agentic reasoning approach:\n"
                 "1. When given a task, identify which tools you need to accomplish it\n"
                 "2. Call the first tool needed to gather information\n"
@@ -27,17 +27,21 @@ class Agent:
                 "\n"
                 "IMPORTANT: Between tool calls, think about what you learned and what you need to do next.\n"
                 "\n"
+                "TOOL SYNTHESIS: If a task would benefit from a custom tool that doesn't exist, use "
+                "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
+                "and Python implementation. After creating a tool, you can immediately use it in subsequent steps.\n"
+                "\n"
                 "Examples of multi-tool reasoning:\n"
                 "- Task: 'Add the current time as a comment to main.py'\n"
                 "  Step 1: Call get_current_time() → learn the time\n"
                 "  Step 2: Call read_file(main.py) → understand file structure\n"
                 "  Step 3: Call write_file() → add time comment based on what you learned\n"
                 "\n"
-                "- Task: 'Read config file and open the website URL mentioned in it'\n"
-                "  Step 1: Call read_file(config) → extract URL\n"
-                "  Step 2: Call open_browser() → open the URL you found\n"
+                "- Task: 'Create a tool to reverse text, then use it on \"hello\"'\n"
+                "  Step 1: Call create_tool() with implementation that reverses a string\n"
+                "  Step 2: Call reverse_text(text='hello') → use your new tool\n"
                 "\n"
-                "Available tools: open_browser, get_current_time, read_file, write_file, end_chat"
+                "Available tools: open_browser, get_current_time, read_file, write_file, create_tool, end_chat"
             )
         )
         self.tool_manager = ToolManager()

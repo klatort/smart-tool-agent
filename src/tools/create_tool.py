@@ -1,54 +1,59 @@
-"""Create new tool scaffold"""
-from typing import Dict, Tuple
-import os
-from pathlib import Path
+"""Create tool - allows the agent to synthesize new tools"""
 import json
-
-TOOLS_DIR = Path(__file__).parent
-AUTO_DIR = TOOLS_DIR / "auto"
+from typing import Dict, Any, Tuple
 
 TOOL_DEF = {
     "type": "function",
     "function": {
         "name": "create_tool",
-        "description": "Create and register a new tool by providing a JSON spec (name, description, parameters). Generates a module under src/tools/auto and registers it for immediate use.",
+        "description": "Synthesize and register a new tool. Provide a complete JSON specification with name, description, parameters (with types and descriptions), and Python implementation. The agent can use this to extend its capabilities dynamically.",
         "parameters": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "New tool name (snake_case)"},
-                "description": {"type": "string", "description": "Human-readable description of the tool"},
-                "parameters": {"type": "object", "description": "JSON Schema for the tool's parameters"}
+                "name": {
+                    "type": "string",
+                    "description": "Tool name (lowercase snake_case, 2-50 chars)"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Clear description of what the tool does (10-500 chars)"
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": "JSON Schema for parameters: {type: 'object', properties: {...}, required: [...]}"
+                },
+                "implementation": {
+                    "type": "string",
+                    "description": "Python function body that receives 'args' dict and returns Tuple[str, bool]. Must return (result_message: str, should_exit: bool)"
+                },
+                "safety_notes": {
+                    "type": "string",
+                    "description": "Optional: Any safety or security notes about this tool"
+                }
             },
-            "required": ["name", "description", "parameters"]
-        },
-    },
+            "required": ["name", "description", "parameters", "implementation"]
+        }
+    }
 }
 
-TEMPLATE = '''"""Auto-generated tool: {name} """\nfrom typing import Dict, Tuple\n\nTOOL_DEF = {{\n    "type": "function",\n    "function": {{\n        "name": "{name}",\n        "description": "{description}",\n        "parameters": {parameters}\n    }},\n}}\n\n\n# NOTE: Implement safe logic here. Avoid network, OS-wide writes, or long runtimes.\n# Return a tuple (result: str, should_exit: bool)\ndef execute(args: Dict[str, object]) -> Tuple[str, bool]:\n    # TODO: Implement the actual tool behavior\n    return f"Tool '{name}' executed with args: {{args}}", False\n'''
 
-
-def execute(args: Dict[str, object]) -> Tuple[str, bool]:
-    name = str(args.get("name", "")).strip()
-    description = str(args.get("description", "")).strip()
-    parameters = args.get("parameters", {})
+def execute(args: Dict[str, Any]) -> Tuple[str, bool]:
+    """Create a new tool from a spec provided by the agent"""
+    from src.tools.auto import AutoToolsRegistry
     
-    # Basic validation
-    if not name or not name.replace("_", "").isalnum():
-        return "Error: Invalid tool name. Use snake_case alphanumerics.", False
-    if not description:
-        return "Error: Description is required.", False
-    if not isinstance(parameters, dict):
-        return "Error: parameters must be a JSON object (dict).", False
+    registry = AutoToolsRegistry()
     
-    AUTO_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = AUTO_DIR / f"{name}.py"
-    if file_path.exists():
-        return f"Error: Tool '{name}' already exists.", False
+    spec = {
+        "name": str(args.get("name", "")).strip(),
+        "description": str(args.get("description", "")).strip(),
+        "parameters": args.get("parameters", {}),
+        "implementation": str(args.get("implementation", "")).strip(),
+        "safety_notes": str(args.get("safety_notes", "")).strip()
+    }
     
-    # Serialize parameters JSON nicely
-    params_json = json.dumps(parameters, indent=4)
-    content = TEMPLATE.format(name=name, description=description.replace('"', '\\"'), parameters=params_json)
+    success, message = registry.create_tool(spec)
     
-    file_path.write_text(content, encoding="utf-8")
-    
-    return f"Created tool '{name}' at {file_path}. Tool definitions reloaded.", False
+    if success:
+        return f"Tool '{spec['name']}' created successfully! You can now use it in subsequent tasks.", False
+    else:
+        return f"Failed to create tool: {message}", False

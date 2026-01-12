@@ -1,6 +1,7 @@
 """Tool manager for registration and execution"""
 from typing import Dict, List, Any, Callable, Tuple
 from src.tools import get_tools, get_tool_functions
+from src.tools.auto import AutoToolsRegistry
 
 
 class ToolManager:
@@ -10,6 +11,9 @@ class ToolManager:
         # Load tools from modular src.tools package
         self.tools: List[Dict[str, Any]] = get_tools()
         self.tool_functions: Dict[str, Callable] = get_tool_functions()
+        
+        # Initialize auto-tools registry
+        self.auto_registry = AutoToolsRegistry()
     
     def reload_tools(self):
         """Reload tool definitions and functions (after auto tool creation)."""
@@ -34,27 +38,43 @@ class ToolManager:
         self.tool_functions[name] = function
     
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
-        """Get all tool definitions for API request"""
-        return self.tools
+        """Get all tool definitions for API request (includes auto-tools)"""
+        static_tools = get_tools()
+        auto_tools = self.auto_registry.get_tools()
+        return static_tools + auto_tools
     
     def execute_tool(self, function_name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
         """
         Execute a tool function
+        Routes to auto-tools if not found in static tools
         Returns: (result_message, should_exit)
         """
-        if function_name not in self.tool_functions:
-            # Try reloading in case a new auto tool was just created
-            self.reload_tools()
-            if function_name not in self.tool_functions:
-                return f"Error: Unknown tool '{function_name}'", False
+        # Try static tools first
+        if function_name in self.tool_functions:
+            try:
+                result = self.tool_functions[function_name](arguments)
+                # After create_tool, reload all tool definitions
+                if function_name == "create_tool":
+                    self.reload_tools()
+                return result
+            except Exception as e:
+                return f"Error executing {function_name}: {str(e)}", False
         
-        try:
-            result = self.tool_functions[function_name](arguments)
-            # If we just created a tool, refresh tool registry
-            if function_name == "create_tool":
-                self.reload_tools()
-            return result
-        except Exception as e:
-            return f"Error executing {function_name}: {str(e)}", False
+        # Try auto-tools
+        if function_name in self.auto_registry.registered_tools:
+            return self.auto_registry.execute_tool(function_name, arguments)
+        
+        # Reload and try again (in case tool just created)
+        self.reload_tools()
+        if function_name in self.tool_functions:
+            try:
+                return self.tool_functions[function_name](arguments)
+            except Exception as e:
+                return f"Error executing {function_name}: {str(e)}", False
+        
+        if function_name in self.auto_registry.registered_tools:
+            return self.auto_registry.execute_tool(function_name, arguments)
+        
+        return f"Error: Unknown tool '{function_name}'", False
     
     # --- Inline tool implementations have been moved to src.tools modules ---
