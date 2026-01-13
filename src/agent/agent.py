@@ -27,6 +27,12 @@ class Agent:
                 "\n"
                 "IMPORTANT: Between tool calls, think about what you learned and what you need to do next.\n"
                 "\n"
+                "CRITICAL - TOOL CALLING FORMAT:\n"
+                "- Tools are called via standard OpenAI function calling (JSON tool_calls)\n"
+                "- NEVER output raw tags like <tool_call>, <tool_sep>, etc.\n"
+                "- The system will automatically parse your tool calls from the proper JSON format\n"
+                "- If you see malformed output, that means you used the wrong format - use standard function calling\n"
+                "\n"
                 "TOOL SYNTHESIS: If a task would benefit from a custom tool that doesn't exist, use "
                 "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
                 "and Python implementation. After creating a tool, you can immediately use it in subsequent steps.\n"
@@ -253,7 +259,24 @@ class Agent:
             
             else:
                 # Agent decided to respond with text
-                self.conversation.add_assistant_message(result["content"])
+                response_text = result["content"]
+                
+                # Detect if the agent is outputting malformed tool syntax
+                if "<tool_call>" in response_text or "<tool_sep>" in response_text:
+                    print(f"{Colors.RED}[Error]: Agent used malformed tool calling syntax!{Colors.RESET}")
+                    print(f"{Colors.YELLOW}[Recovery]: Clearing conversation and restarting...{Colors.RESET}\n")
+                    # Add correction to conversation
+                    self.conversation.add_assistant_message("")
+                    self.conversation.add_user_message(
+                        "ERROR: You used malformed tool syntax like <tool_call>. "
+                        "You must use standard OpenAI function calling (JSON format). "
+                        "The tools are properly configured - just call them normally. "
+                        "Please retry your last action using proper function calling."
+                    )
+                    # Continue loop to let agent retry
+                    continue
+                
+                self.conversation.add_assistant_message(response_text)
                 if tool_execution_count > 0:
                     print(f"{Colors.CYAN}[Task complete: Executed {tool_execution_count} tool(s) across {step} step(s)]{Colors.RESET}\n")
                 return False
