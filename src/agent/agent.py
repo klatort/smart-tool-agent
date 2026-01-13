@@ -157,6 +157,9 @@ class Agent:
             # Only print "Assistant:" on first step
             if step == 1:
                 print(f"{Colors.CYAN}Assistant: {Colors.RESET}", end="", flush=True)
+            elif step > 1:
+                # On reasoning steps, show what the agent is thinking
+                print(f"{Colors.CYAN}[Agent reasoning]: {Colors.RESET}", end="", flush=True)
             
             # Reset stream parser
             self.stream_parser.reset()
@@ -175,14 +178,10 @@ class Agent:
                         if delta.get('done'):
                             break
                         
-                        # Print text only on first step
-                        if step == 1:
-                            text = self.stream_parser.handle_delta(delta)
-                            if text:
-                                print(text, end="", flush=True)
-                        else:
-                            # Process deltas silently on subsequent steps (agent is reasoning)
-                            self.stream_parser.handle_delta(delta)
+                        # Print text on all steps
+                        text = self.stream_parser.handle_delta(delta)
+                        if text:
+                            print(text, end="", flush=True)
             
             except requests.exceptions.RequestException as e:
                 print(f"\n{Colors.RED}[Error] API request failed: {e}{Colors.RESET}")
@@ -194,8 +193,6 @@ class Agent:
             
             if step == 1:
                 print()  # Newline after first response
-            
-            # Process the result
             result = self.stream_parser.get_result()
             
             if result["type"] == "tool_calls":
@@ -296,10 +293,9 @@ class Agent:
                 if should_exit:
                     return True
                 
-                # Show reasoning prompt to encourage agent to think about next step
+                # Show what's next
                 if step == 1:
-                    print(f"{Colors.CYAN}[Reasoning about tool results...]" + 
-                          f" Agent will decide next action...{Colors.RESET}\n")
+                    print(f"{Colors.CYAN}[Agent analyzing results...]{Colors.RESET}\n")
                 
                 # After first tool execution, if we got good results, push agent to respond
                 # by injecting a message asking to summarize findings
