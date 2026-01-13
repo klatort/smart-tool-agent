@@ -31,12 +31,16 @@ class Agent:
                 "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
                 "and Python implementation. After creating a tool, you can immediately use it in subsequent steps.\n"
                 "\n"
-                "TOOL DEBUGGING: When a tool fails with an error, DON'T recreate it! Instead:\n"
-                "1. Analyze the error message to understand what went wrong\n"
-                "2. Use 'update_tool' to fix the implementation with the corrected code\n"
-                "3. Test the updated tool again\n"
-                "4. Continue iterating with update_tool until it works\n"
-                "This is much more efficient than creating tools from scratch repeatedly.\n"
+                "TOOL DEBUGGING: When a tool fails with an error:\n"
+                "1. READ THE ERROR MESSAGE CAREFULLY - it tells you exactly what's wrong\n"
+                "2. Analyze the root cause (missing module? wrong return format? logic error?)\n"
+                "3. Use 'update_tool' ONCE to fix the specific issue\n"
+                "4. ALWAYS TEST the tool after updating - don't update multiple times without testing!\n"
+                "5. If it fails again, repeat from step 1\n"
+                "\n"
+                "CRITICAL: Never update a tool twice in a row without testing it in between!\n"
+                "CRITICAL: Don't guess - fix the actual error shown in the message!\n"
+                "CRITICAL: Standard library only - no 'requests', no 'pandas', etc. Use urllib.request instead!\n"
                 "\n"
                 "CRITICAL for tool implementations: ALL code paths MUST return a 2-tuple: (message: str, should_exit: bool)\n"
                 "Example: return 'Result: 42', False  (correct)\n"
@@ -63,6 +67,8 @@ class Agent:
         """Main chat loop"""
         print(f"{Colors.CYAN}--- Connected to {self.model_id} ---{Colors.RESET}")
         print(f"{Colors.YELLOW}Available tools: browser, time, files, end_chat{Colors.RESET}\n")
+        
+        last_tool_used = None  # Track last tool to prevent consecutive update_tool calls
         
         while True:
             try:
@@ -182,6 +188,18 @@ class Agent:
                     func_name = tool_call["function_name"]
                     args = tool_call["arguments"]
                     
+                    # Check for consecutive update_tool calls
+                    if func_name == "update_tool" and last_tool_used == "update_tool":
+                        print(f"{Colors.RED}[Warning]: Consecutive update_tool detected! You must TEST the tool before updating again.{Colors.RESET}\n")
+                        # Add warning to conversation for agent to see
+                        self.conversation.add_tool_result(
+                            tool_call_id=tool_call["id"],
+                            function_name=func_name,
+                            result="ERROR: You updated a tool without testing it first! You must call the updated tool to verify it works before updating it again. Test-first approach required."
+                        )
+                        last_tool_used = func_name
+                        continue
+                    
                     print(f"{Colors.YELLOW}[Tool {i}/{len(tool_calls)}]: {func_name}{Colors.RESET}")
                     print(f"  {Colors.CYAN}Args: {args}{Colors.RESET}")
                     
@@ -199,6 +217,9 @@ class Agent:
                             function_name=func_name,
                             result=tool_result
                         )
+                        
+                        # Track last tool used
+                        last_tool_used = func_name
                         
                         if exit_flag:
                             should_exit = True
