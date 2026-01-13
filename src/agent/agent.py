@@ -40,10 +40,10 @@ class Agent:
                 "WRONG: Call get_ip_addresses() again and again\n"
                 "\n"
                 "CRITICAL - TOOL CALLING FORMAT:\n"
-                "- Tools are called via standard OpenAI function calling (JSON tool_calls)\n"
-                "- NEVER output raw tags like <tool_call>, <tool_sep>, etc.\n"
-                "- The system will automatically parse your tool calls from the proper JSON format\n"
-                "- If you see malformed output, that means you used the wrong format - use standard function calling\n"
+                "- This is an OpenAI-compatible API with standard function calling\n"
+                "- When you want to use a tool, just express intent - the system handles the format\n"
+                "- DO NOT manually write JSON or use tags like <tool_call>, <tool_sep>, etc.\n"
+                "- The API will automatically handle tool formatting\n"
                 "\n"
                 "TOOL SYNTHESIS: If a task would benefit from a custom tool that doesn't exist, use "
                 "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
@@ -307,18 +307,28 @@ class Agent:
                 response_text = result["content"]
                 
                 # Detect if the agent is outputting malformed tool syntax
-                if "<tool_call>" in response_text or "<tool_sep>" in response_text:
+                if "<tool_call>" in response_text or "<tool_sep>" in response_text or (response_text.strip().startswith("{") and "\"name\":" in response_text):
                     print(f"{Colors.RED}[Error]: Agent used malformed tool calling syntax!{Colors.RESET}")
-                    print(f"{Colors.YELLOW}[Recovery]: Clearing conversation and restarting...{Colors.RESET}\n")
-                    # Add correction to conversation
-                    self.conversation.add_assistant_message("")
+                    print(f"{Colors.YELLOW}[Recovery]: The agent is confused. Resetting conversation context...{Colors.RESET}\n")
+                    
+                    # Clear recent problematic messages to reset context
+                    messages = self.conversation.get_messages()
+                    if len(messages) > 5:
+                        # Keep system prompt and last 2 user messages only
+                        system_msg = messages[0]
+                        recent_user_msgs = [m for m in messages[-4:] if m["role"] == "user"]
+                        self.conversation.messages = [system_msg] + recent_user_msgs[-2:]
+                    
+                    # Add clear instruction
                     self.conversation.add_user_message(
-                        "ERROR: You used malformed tool syntax like <tool_call>. "
-                        "You must use standard OpenAI function calling (JSON format). "
-                        "The tools are properly configured - just call them normally. "
-                        "Please retry your last action using proper function calling."
+                        "CRITICAL ERROR: You are not using the correct tool calling format. "
+                        "This API uses standard OpenAI-compatible function calling. "
+                        "When you want to use a tool, the system automatically formats it for you. "
+                        "Just indicate which tool you want to use through the proper API mechanism. "
+                        "DO NOT output raw JSON or tags like <tool_call>. "
+                        "Please respond to my original request now."
                     )
-                    # Continue loop to let agent retry
+                    # Continue loop to let agent retry with cleaned context
                     continue
                 
                 self.conversation.add_assistant_message(response_text)
