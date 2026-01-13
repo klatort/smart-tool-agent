@@ -654,6 +654,22 @@ class Agent:
                 
                 self.conversation.add_assistant_message(response_text)
                 self._log_message("assistant", response_text, f"step_{step}_final")
+                
+                # Check if the response indicates the agent wants to continue (more tools needed)
+                continuation_indicators = [
+                    "i will", "i'll", "let me", "i need to", "next", "now i", "first", "then",
+                    "i should", "i can", "i'm going to", "step ", "after that"
+                ]
+                wants_to_continue = any(indicator in response_text.lower() for indicator in continuation_indicators)
+                
+                # If agent seems to want to continue and we haven't hit max steps, let it continue
+                if wants_to_continue and step < max_steps:
+                    print(f"\n{Colors.CYAN}{'─'*70}{Colors.RESET}")
+                    print(f"{Colors.CYAN}💭 Agent reasoning... (Step {step}/{max_steps}){Colors.RESET}")
+                    print(f"{Colors.CYAN}{'─'*70}{Colors.RESET}\n")
+                    continue  # Let the agent continue to next step
+                
+                # Otherwise, treat as completion
                 if tool_execution_count > 0:
                     print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
                     print(f"{Colors.GREEN}✅ Task Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
