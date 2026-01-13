@@ -27,6 +27,17 @@ class Agent:
                 "\n"
                 "IMPORTANT: Between tool calls, think about what you learned and what you need to do next.\n"
                 "\n"
+                "CRITICAL REASONING RULES:\n"
+                "- After EVERY tool execution, evaluate: Did this help? Do I have what I need?\n"
+                "- If a tool gives you the answer, RESPOND to the user immediately - don't call it again!\n"
+                "- If a tool fails or gives incomplete data, try a DIFFERENT approach - not the same tool!\n"
+                "- NEVER call the same tool twice in a row with the same arguments without changing strategy\n"
+                "- If you're stuck after 2-3 attempts, explain the problem to the user and ask for guidance\n"
+                "\n"
+                "Example: User asks for IP address → get_ip_addresses() returns 'Public IP: 1.2.3.4'\n"
+                "CORRECT: Respond 'Your public IP is 1.2.3.4'\n"
+                "WRONG: Call get_ip_addresses() again and again\n"
+                "\n"
                 "CRITICAL - TOOL CALLING FORMAT:\n"
                 "- Tools are called via standard OpenAI function calling (JSON tool_calls)\n"
                 "- NEVER output raw tags like <tool_call>, <tool_sep>, etc.\n"
@@ -81,6 +92,7 @@ class Agent:
         print(f"{Colors.YELLOW}Available tools: browser, time, files, end_chat{Colors.RESET}\n")
         
         last_tool_used = None  # Track last tool to prevent consecutive update_tool calls
+        last_tool_call = None  # Track last tool+args to detect infinite loops
         
         while True:
             try:
@@ -124,6 +136,8 @@ class Agent:
         max_steps = 10
         step = 0
         tool_execution_count = 0  # Track total tools executed
+        last_tool_signature = None  # Track (tool_name, args) to detect loops
+        repeat_count = 0  # Count consecutive identical calls
         
         while step < max_steps:
             step += 1
@@ -199,6 +213,36 @@ class Agent:
                     tool_execution_count += 1
                     func_name = tool_call["function_name"]
                     args = tool_call["arguments"]
+                    
+                    # Create signature for this tool call
+                    tool_signature = (func_name, json.dumps(args, sort_keys=True))
+                    
+                    # Check for identical repeated calls
+                    if tool_signature == last_tool_signature:
+                        repeat_count += 1
+                        if repeat_count >= 2:
+                            print(f"{Colors.RED}[Warning]: Agent is repeating the same tool call!{Colors.RESET}")
+                            print(f"{Colors.YELLOW}[Intervention]: Breaking loop and forcing response{Colors.RESET}\n")
+                            # Add intervention message
+                            self.conversation.add_tool_result(
+                                tool_call_id=tool_call["id"],
+                                function_name=func_name,
+                                result=(
+                                    f"SYSTEM INTERVENTION: You've called {func_name} with identical arguments 3 times. "
+                                    f"This is not productive. You must either:\n"
+                                    f"1. RESPOND to the user with what you've learned, OR\n"
+                                    f"2. Try a DIFFERENT tool or approach, OR\n"
+                                    f"3. Explain what's blocking you\n"
+                                    f"DO NOT call the same tool again!"
+                                )
+                            )
+                            # Reset and continue to force agent to respond
+                            last_tool_signature = None
+                            repeat_count = 0
+                            continue
+                    else:
+                        last_tool_signature = tool_signature
+                        repeat_count = 0
                     
                     # Check for consecutive update_tool calls
                     if func_name == "update_tool" and last_tool_used == "update_tool":
