@@ -174,6 +174,14 @@ class Agent:
             # Logging should never break the agent
             pass
     
+    def _log_message(self, role: str, content: str, context: str = ""):
+        """Log full message content with role and optional context."""
+        self._log_event("message", {
+            "role": role,
+            "context": context,
+            "content": content[:2000] if len(content) > 2000 else content  # Limit very long content
+        })
+    
     def run(self):
         """Main chat loop"""
         print(f"\n{Colors.CYAN}{'='*70}{Colors.RESET}")
@@ -217,7 +225,7 @@ class Agent:
                 
                 # Add to conversation
                 self.conversation.add_user_message(user_input)
-                self._log_event("user", {"message": user_input})
+                self._log_message("user", user_input, "user_input")
                 
                 # Make API request
                 should_exit = self._handle_turn()
@@ -277,11 +285,9 @@ class Agent:
             stream_received_data = False
             stream_content = ""
             try:
-                self._log_event("api_request", {
+                self._log_event("step_start", {
                     "step": step,
-                    "max_tokens": payload["max_tokens"],
-                    "temperature": payload["temperature"],
-                    "num_messages": len(payload["messages"])
+                    "max_steps": max_steps
                 })
                 
                 with requests.post(self.api_url, headers=headers, json=payload, stream=True, timeout=60) as response:
@@ -296,7 +302,6 @@ class Agent:
                         stream_received_data = True
                         
                         if delta.get('done'):
-                            self._log_event("stream_complete", {"step": step, "content_length": len(stream_content)})
                             break
                         
                         # Print text on all steps
@@ -351,6 +356,7 @@ class Agent:
                     "tools": [tc.get("function_name") for tc in result.get("tool_calls", [])]
                 })
             else:
+                self._log_message("assistant", result.get("content", ""), f"step_{step}_reasoning")
                 self._log_event("parsed_text_response", {
                     "step": step,
                     "response_length": len(result.get("content", ""))
@@ -362,11 +368,10 @@ class Agent:
                 if not tool_calls:
                     print(f"{Colors.RED}[Error]: Failed to parse tool calls{Colors.RESET}")
                     print(f"{Colors.YELLOW}[Recovery]: Asking the agent to re-issue the tool call with valid JSON arguments and shorter payload if large.{Colors.RESET}\n")
-                    self.conversation.add_user_message(
-                        "Your previous tool call arguments were malformed or too long. "
-                        "Re-issue the tool call now with valid JSON arguments only (no extra text), keep payload concise, and let the API format it. "
-                        "If you need to send code, keep it minimal and valid JSON."
-                    )
+                    recovery_msg = "Your previous tool call arguments were malformed or too long. Re-issue the tool call now with valid JSON arguments only (no extra text), keep payload concise, and let the API format it. If you need to send code, keep it minimal and valid JSON."
+                    self.conversation.add_user_message(recovery_msg)
+                    self._log_message("user", recovery_msg, "tool_parse_error_recovery")
+                    continue
                     continue
                 
                 # Add agent's tool use to conversation (empty content for tool-only messages)
@@ -466,6 +471,8 @@ class Agent:
                     else:
                         print(f"   {Colors.CYAN}├─ Args:{Colors.RESET} (none)")
                     
+                    self._log_message("tool_call", json.dumps({"function": func_name, "arguments": args}), f"step_{step}")
+                    
                     try:
                         tool_result, exit_flag = self.tool_manager.execute_tool(func_name, args)
                         
@@ -474,6 +481,9 @@ class Agent:
                         result_display = truncate_text(tool_result, max_length=300)
                         print(f"   {Colors.CYAN}└─ Result:{Colors.RESET} {result_display}")
                         print()  # Blank line for spacing
+
+                        # Log tool result
+                        self._log_message("tool_result", tool_result, f"tool_{func_name}_step_{step}")
                         
                         # Track success/failure
                         if "Error" in tool_result or "error" in tool_result.lower():
@@ -593,11 +603,7 @@ class Agent:
                     print(f"{Colors.YELLOW}The agent emitted XML/JSON tool syntax instead of using the API properly.{Colors.RESET}")
                     print(f"{Colors.YELLOW}Recovery: Forcing a retry with a clear instruction to call tools via function-calling (no raw JSON/XML).{Colors.RESET}\n")
 
-                    self._log_event("malformed_syntax_detected", {
-                        "step": step,
-                        "response_snippet": response_text[:200],
-                        "pattern_detected": [p for p in malformed_patterns if p in response_text]
-                    })
+                    self._log_message("malformed_syntax_detected", response_text[:500], f"step_{step}malformed")
 
                     # Inject guidance so the model fixes itself without asking the user
                     self.conversation.add_user_message(
@@ -621,19 +627,14 @@ class Agent:
                         break
                 if pseudo_call:
                     print(f"{Colors.YELLOW}[Warning]: Assistant described a tool call in text instead of executing it.{Colors.RESET}\n")
-                    self._log_event("pseudo_tool_call_detected", {
-                        "step": step,
-                        "response_snippet": response_text[:200],
-                        "detected_tools": [name for name in tool_names if name in lowered]
-                    })
-                    self.conversation.add_user_message(
-                        "You wrote a plain-text tool call instead of executing it. Call the tool now using function calling; "
-                        "do not repeat the text. Use the same arguments you intended."
-                        " Example: If you meant read_file('path'), call read_file with file_path='path' so the API executes it."
-                    )
+                    self._log_message("pseudo_tool_call", response_text[:500], f"step_{step}")
+                    recovery_msg = "You wrote a plain-text tool call instead of executing it. Call the tool now using function calling; do not repeat the text. Use the same arguments you intended. Example: If you meant read_file('path'), call read_file with file_path='path' so the API executes it."
+                    self.conversation.add_user_message(recovery_msg)
+                    self._log_message("user", recovery_msg, "pseudo_call_recovery")
                     continue
                 
                 self.conversation.add_assistant_message(response_text)
+                self._log_message("assistant", response_text, f"step_{step}_final")
                 if tool_execution_count > 0:
                     print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
                     print(f"{Colors.GREEN}✅ Task Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
@@ -642,14 +643,7 @@ class Agent:
                     self._log_event("task_complete", {
                         "step": step,
                         "tool_count": tool_execution_count,
-                        "response_length": len(response_text),
-                        "response_preview": response_text[:300]
-                    })
-                else:
-                    self._log_event("final_response", {
-                        "step": step,
-                        "response_length": len(response_text),
-                        "response_preview": response_text[:300]
+                        "response_length": len(response_text)
                     })
                 return False
         
