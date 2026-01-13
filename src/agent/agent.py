@@ -31,13 +31,15 @@ class Agent:
                 "CRITICAL REASONING RULES:\n"
                 "- After EVERY tool execution, evaluate: Did this help? Do I have what I need?\n"
                 "- If a tool gives you the answer, RESPOND to the user immediately - don't call it again!\n"
+                "- Always summarize the results for the user in a clear, readable format\n"
                 "- If a tool fails or gives incomplete data, try a DIFFERENT approach - not the same tool!\n"
                 "- NEVER call the same tool twice in a row with the same arguments without changing strategy\n"
                 "- If you're stuck after 2-3 attempts, explain the problem to the user and ask for guidance\n"
                 "\n"
-                "Example: User asks for IP address → get_ip_addresses() returns 'Public IP: 1.2.3.4'\n"
-                "CORRECT: Respond 'Your public IP is 1.2.3.4'\n"
-                "WRONG: Call get_ip_addresses() again and again\n"
+                "TOOL MANAGEMENT:\n"
+                "- If you create duplicate or similar tools, use remove_tool to delete the old/broken ones\n"
+                "- Keep your tool ecosystem clean by removing superseded tools\n"
+                "- Example: if you create both 'get_ips' and 'get_ip_addresses', remove the weaker one\n"
                 "\n"
                 "CRITICAL - TOOL CALLING FORMAT:\n"
                 "- This is an OpenAI-compatible API with standard function calling\n"
@@ -298,6 +300,23 @@ class Agent:
                 if step == 1:
                     print(f"{Colors.CYAN}[Reasoning about tool results...]" + 
                           f" Agent will decide next action...{Colors.RESET}\n")
+                
+                # After first tool execution, if we got good results, push agent to respond
+                # by injecting a message asking to summarize findings
+                if step == 2 and tool_execution_count > 0:
+                    # Check if recent tool results look complete (not error-like)
+                    messages = self.conversation.get_messages()
+                    last_tool_result = None
+                    for msg in reversed(messages):
+                        if msg.get("role") == "tool":
+                            last_tool_result = msg.get("content", "")
+                            break
+                    
+                    # If we have a result that's not an error, nudge agent to respond
+                    if last_tool_result and "error" not in last_tool_result.lower():
+                        self.conversation.add_user_message(
+                            "Based on the tool results above, please provide a clear summary of what you found to answer my original request."
+                        )
                 
                 # Loop continues - agent will reason about tool results and decide next action
                 continue
