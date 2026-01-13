@@ -121,12 +121,22 @@ def generate_tool_module(spec: Dict[str, Any], timestamp: str = None) -> str:
     # If the implementation looks like a function def, extract just the body
     impl_lines = implementation.strip().split('\n')
     body_lines = []
+    import_lines = []
     in_function = False
+    
     for line in impl_lines:
-        if line.strip().startswith('def '):
+        stripped = line.strip()
+        
+        # Extract top-level imports (before any function definition)
+        if not in_function and (stripped.startswith('import ') or stripped.startswith('from ')):
+            import_lines.append(line)
+            continue
+        
+        if stripped.startswith('def '):
             in_function = True
             # Skip the def line, we'll redefine as execute()
             continue
+        
         if in_function:
             body_lines.append(line)
     
@@ -147,15 +157,34 @@ def generate_tool_module(spec: Dict[str, Any], timestamp: str = None) -> str:
     else:
         impl_to_use = implementation.strip()
     
+    # Extract imports from within the implementation body if any
+    impl_body_lines = impl_to_use.split('\n')
+    final_body_lines = []
+    for line in impl_body_lines:
+        stripped = line.strip()
+        if stripped.startswith('import ') or stripped.startswith('from '):
+            # Move imports to module level
+            import_lines.append(line)
+        else:
+            final_body_lines.append(line)
+    
+    # Rebuild implementation without imports
+    impl_to_use = '\n'.join(final_body_lines).strip()
+    
     # Indent the implementation code for the execute function
     indented_impl = indent_code(impl_to_use, 4)
+    
+    # Build imports section
+    imports_section = '\n'.join(import_lines) if import_lines else ''
+    if imports_section:
+        imports_section = '\n' + imports_section
     
     # Generate module code
     module_code = f'''"""Auto-generated tool: {name}
 Generated at: {timestamp}
 Safety notes: {safety_notes}
 """
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any{imports_section}
 
 TOOL_DEF = {tool_def_str}
 
