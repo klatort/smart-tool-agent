@@ -9,6 +9,7 @@ from .open_browser import TOOL_DEF as OPEN_BROWSER_DEF, execute as open_browser_
 from .get_current_time import TOOL_DEF as GET_CURRENT_TIME_DEF, execute as get_current_time_execute
 from .read_file import TOOL_DEF as READ_FILE_DEF, execute as read_file_execute
 from .write_file import TOOL_DEF as WRITE_FILE_DEF, execute as write_file_execute
+from .web_search import TOOL_DEF as WEB_SEARCH_DEF, execute as web_search_execute
 from .create_tool import TOOL_DEF as CREATE_TOOL_DEF, execute as create_tool_execute
 from .update_tool import TOOL_DEF as UPDATE_TOOL_DEF, execute as update_tool_execute
 from .install_package import TOOL_DEF as INSTALL_PACKAGE_DEF, execute as install_package_execute
@@ -44,6 +45,7 @@ def get_tools() -> List[Dict[str, Any]]:
         GET_CURRENT_TIME_DEF,
         READ_FILE_DEF,
         WRITE_FILE_DEF,
+        WEB_SEARCH_DEF,
         CREATE_TOOL_DEF,
         UPDATE_TOOL_DEF,
         INSTALL_PACKAGE_DEF,
@@ -60,6 +62,7 @@ def get_tool_functions() -> Dict[str, Callable]:
         "get_current_time": get_current_time_execute,
         "read_file": read_file_execute,
         "write_file": write_file_execute,
+        "web_search": web_search_execute,
         "create_tool": create_tool_execute,
         "update_tool": update_tool_execute,
         "install_package": install_package_execute,

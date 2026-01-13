@@ -112,6 +112,17 @@ class Agent:
                 "- Prefer standard library when possible, but don't hesitate to install what you need\n"
                 "- Example: Error 'No module named requests' → Call install_package(package='requests')\n"
                 "\n"
+                "INTERNET RESEARCH - When Package/Compatibility Issues Block You:\n"
+                "- If you encounter package compatibility errors, unknown packages, or unclear solutions: USE WEB SEARCH\n"
+                "- Use 'web_search' to find:\n"
+                "  * Package alternatives (e.g., openpyxl, xlrd, or other Excel libraries)\n"
+                "  * Installation instructions and compatibility info\n"
+                "  * Error solutions and troubleshooting guides\n"
+                "  * Up-to-date documentation\n"
+                "- Example: Tool creation fails with 'pandas not found' → web_search('pandas installation python')\n"
+                "- Example: 'ImportError: No module openpyxl' → web_search('openpyxl python excel read alternative', search_type='package')\n"
+                "- Example: Unknown error → web_search('error message python solution', search_type='error')\n"
+                "- NEVER assume packages don't exist - search for them and find alternatives if needed\n"
                 "\n"
                 "CRITICAL for tool implementations: ALL code paths MUST return a 2-tuple: (message: str, should_exit: bool)\n"
                 "Example: return 'Result: 42', False  (correct)\n"
@@ -147,13 +158,13 @@ class Agent:
         tool_names = [t["function"]["name"] for t in self.available_tools]
         
         print(f"{Colors.YELLOW}📦 Available Tools ({len(tool_names)} total):{Colors.RESET}")
-        print(f"{Colors.CYAN}  Core:{Colors.RESET} read_file, write_file, open_browser, get_current_time")
+        print(f"{Colors.CYAN}  Core:{Colors.RESET} read_file, write_file, open_browser, get_current_time, web_search")
         print(f"{Colors.CYAN}  Mgmt:{Colors.RESET} create_tool, update_tool, remove_tool, install_package")
         
         # Show custom tools if any exist
         custom_tools = [t for t in tool_names if t not in [
             "end_chat", "open_browser", "get_current_time", "read_file", "write_file",
-            "create_tool", "update_tool", "install_package", "remove_tool"
+            "web_search", "create_tool", "update_tool", "install_package", "remove_tool"
         ]]
         if custom_tools:
             custom_str = ", ".join(custom_tools[:5])  # Show first 5
