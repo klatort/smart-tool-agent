@@ -109,6 +109,14 @@ class Agent:
                 "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
                 "and Python implementation. After creating a tool, you can immediately use it in subsequent steps.\n"
                 "\n"
+                "CRITICAL - JSON ESCAPING for create_tool:\n"
+                "- The 'implementation' parameter is a Python code STRING that will be written to a file\n"
+                "- Use SINGLE QUOTES for strings inside your Python code to avoid escaping issues\n"
+                "- BAD: implementation='return \"hello world\", False' (requires escaping the double quotes)\n"
+                "- GOOD: implementation='return \\'hello world\\', False' (single quotes, cleaner)\n"
+                "- Avoid excessive backslashes - they cause syntax errors\n"
+                "- Test your escaping: if you get SyntaxError, simplify your strings\n"
+                "\n"
                 "TOOL DEBUGGING: When a tool fails with an error:\n"
                 "1. READ THE ERROR MESSAGE CAREFULLY - it tells you exactly what's wrong\n"
                 "2. Analyze the root cause (missing module? wrong return format? logic error?)\n"
@@ -531,14 +539,19 @@ class Agent:
                     })
 
                     # Add intervention to force reflection
-                    self.conversation.add_user_message(
-                        f"IMPORTANT: You've had {consecutive_errors} consecutive failed tool calls. "
-                        f"The current approach clearly isn't working. Please STOP and:\\n"
-                        f"1. Explain what's blocking you\\n"
-                        f"2. Tell me what information or capability you're missing\\n"
-                        f"3. Suggest a completely different approach\\n"
-                        f"\\nDo NOT retry the same failed tools. Think differently."
+                    intervention_msg = (
+                        f"CRITICAL: {consecutive_errors} consecutive failures. You are stuck in a loop.\\n\\n"
+                        "MANDATORY ACTIONS:\\n"
+                        "1. READ THE ERROR: What is the actual technical error message?\\n"
+                        "2. IDENTIFY ROOT CAUSE: Why is it failing? (dependency missing? syntax error? wrong approach?)\\n"
+                        "3. CHANGE YOUR APPROACH COMPLETELY: Do not retry the same failing action.\\n\\n"
+                        "SPECIFIC GUIDANCE:\\n"
+                        "- Tool creation syntax errors? Check JSON escaping - use single quotes in strings, avoid excessive backslashes\\n"
+                        "- Package installation fails? Try simpler pure-Python alternatives or use web_search for solutions\\n"
+                        "- Fundamental approach broken? Try a completely different method\\n\\n"
+                        "EXECUTE A DIFFERENT STRATEGY NOW. Do not repeat what just failed."
                     )
+                    self.conversation.add_user_message(intervention_msg)
                     consecutive_errors = 0  # Reset after intervention
                 
                 # If any tool requested exit, stop the loop
@@ -606,15 +619,15 @@ class Agent:
                     self._log_message("malformed_syntax_detected", response_text[:500], f"step_{step}malformed")
 
                     # Inject guidance so the model fixes itself without asking the user
-                    self.conversation.add_user_message(
-                        "Your last reply used invalid tool syntax (XML/JSON). Correct format reminder:"
-                        " 1) Decide the tool you need from the provided definitions."
-                        " 2) State the tool name and arguments; the API will format the function-call."
-                        " 3) Do NOT emit raw JSON, XML, <tool_call>, <function_call>, or {\"name\":...} payloads."
-                        " 4) If no tool is needed, answer in plain text."
-                        " 5) Proceed now using proper function calling; do not ask to restart or change the prompt."
-                        " Example of correct call: read_file with file_path='D:/data/foo.txt' (the API handles formatting)."
+                    recovery = (
+                        "CRITICAL ERROR: You used malformed tool syntax. Stop using XML/JSON tags.\n\n"
+                        "WRONG: <tool_call>read_file<tool_sep>{...}</tool_call>\n"
+                        "WRONG: {\"name\": \"read_file\", \"arguments\": {...}}\n"
+                        "WRONG: 'read_file(...)' as plain text\n\n"
+                        "RIGHT: Use the API's function calling mechanism. Just invoke the function.\n\n"
+                        "RETRY NOW: Execute the tool using function calling (no text, no XML, no JSON)."
                     )
+                    self.conversation.add_user_message(recovery)
                     continue
 
                 # Detect plain-text pseudo tool calls like "read_file <path>" that should have been real calls
@@ -628,7 +641,13 @@ class Agent:
                 if pseudo_call:
                     print(f"{Colors.YELLOW}[Warning]: Assistant described a tool call in text instead of executing it.{Colors.RESET}\n")
                     self._log_message("pseudo_tool_call", response_text[:500], f"step_{step}")
-                    recovery_msg = "You wrote a plain-text tool call instead of executing it. Call the tool now using function calling; do not repeat the text. Use the same arguments you intended. Example: If you meant read_file('path'), call read_file with file_path='path' so the API executes it."
+                    recovery_msg = (
+                        "ERROR: You described a tool call as text instead of executing it.\n\n"
+                        "What you did: Wrote text like 'read_file with file_path=...'\n"
+                        "What you MUST do: Use the API's function calling to execute the tool.\n\n"
+                        "STOP writing text. START using actual function calls.\n"
+                        "EXECUTE THE TOOL NOW (no text description, actual function call)."
+                    )
                     self.conversation.add_user_message(recovery_msg)
                     self._log_message("user", recovery_msg, "pseudo_call_recovery")
                     continue
