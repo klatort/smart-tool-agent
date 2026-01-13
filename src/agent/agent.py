@@ -250,6 +250,7 @@ class Agent:
             self.stream_parser.reset()
             
             # Stream the response
+            stream_received_data = False
             try:
                 with requests.post(self.api_url, headers=headers, json=payload, stream=True, timeout=60) as response:
                     response.raise_for_status()
@@ -260,6 +261,8 @@ class Agent:
                         if delta is None:
                             continue
                         
+                        stream_received_data = True
+                        
                         if delta.get('done'):
                             break
                         
@@ -267,6 +270,15 @@ class Agent:
                         text = self.stream_parser.handle_delta(delta)
                         if text:
                             print(text, end="", flush=True)
+                
+                # Check if stream was completely empty
+                if not stream_received_data:
+                    print(f"{Colors.YELLOW}[Warning]: Stream had no data. Retrying...{Colors.RESET}\n")
+                    if step < max_steps:
+                        continue
+                    else:
+                        print(f"{Colors.RED}[Error]: No response data received from API{Colors.RESET}")
+                        return False
             
             except requests.exceptions.RequestException as e:
                 print(f"\n{Colors.RED}[Error] API request failed: {e}{Colors.RESET}")
@@ -279,6 +291,17 @@ class Agent:
             if step == 1:
                 print()  # Newline after first response
             result = self.stream_parser.get_result()
+            
+            # Check for empty response - could indicate stream parsing issue
+            if not result or (result["type"] == "text" and not result.get("content", "").strip()):
+                print(f"{Colors.YELLOW}[Warning]: Received empty response from API. Retrying...{Colors.RESET}\n")
+                if step < max_steps:
+                    # Reset and try again
+                    self.stream_parser.reset()
+                    continue
+                else:
+                    print(f"{Colors.RED}[Error]: Max retries reached with empty responses{Colors.RESET}")
+                    return False
             
             if result["type"] == "tool_calls":
                 # Agent decided to use a tool
@@ -475,7 +498,16 @@ class Agent:
             
             else:
                 # Agent decided to respond with text
-                response_text = result["content"]
+                response_text = result.get("content", "").strip()
+                
+                # If response is still empty after all checks, retry
+                if not response_text:
+                    print(f"{Colors.YELLOW}[Warning]: Response text is empty. Retrying...{Colors.RESET}\n")
+                    if step < max_steps:
+                        continue
+                    else:
+                        print(f"{Colors.RED}[Error]: No valid response received after {max_steps} attempts{Colors.RESET}")
+                        return False
                 
                 # Detect if the agent is outputting malformed tool syntax
                 malformed_patterns = [
@@ -485,7 +517,7 @@ class Agent:
                 has_malformed = any(pattern in response_text for pattern in malformed_patterns)
                 
                 # Also check for raw JSON function calls at start
-                if not has_malformed and response_text.strip().startswith("{"):
+                if not has_malformed and response_text.startswith("{"):
                     if '"name":' in response_text or '"function"' in response_text or '"arguments"' in response_text:
                         has_malformed = True
                 
