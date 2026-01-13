@@ -1,24 +1,28 @@
-"""Web search tool - allows agent to search for information online"""
+"""Web search tool - allows agent to search for information online using DuckDuckGo via LangChain"""
 from typing import Dict, Tuple
 import requests
-from urllib.parse import quote
+try:
+    from langchain_community.tools import DuckDuckGoSearchRun
+    LANGCHAIN_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_AVAILABLE = False
 
 TOOL_DEF = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the internet for information about packages, troubleshooting, or technical topics. Use this when you need current information about Python packages, compatibility issues, installation problems, or general technical questions.",
+        "description": "Search the internet for current information about Python packages, troubleshooting, compatibility issues, or technical topics. Use this when encountering unknown packages, compatibility errors, or need up-to-date documentation and solutions.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query (e.g., 'pandas python package installation', 'openpyxl excel compatibility', 'python requests module')"
+                    "description": "The search query (e.g., 'pandas python package installation', 'openpyxl excel compatibility with python', 'how to read xlsx files python 2025')"
                 },
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'general' for general web search, 'package' for Python package info, 'error' for error troubleshooting",
-                    "enum": ["general", "package", "error"]
+                    "description": "Type of search: 'general' for general web search, 'package' for Python package info, 'error' for error troubleshooting, 'docs' for documentation",
+                    "enum": ["general", "package", "error", "docs"]
                 }
             },
             "required": ["query"]
@@ -28,7 +32,7 @@ TOOL_DEF = {
 
 
 def execute(args: Dict[str, object]) -> Tuple[str, bool]:
-    """Execute web search and return results"""
+    """Execute web search using LangChain's DuckDuckGo or fallback"""
     query = str(args.get("query", "")).strip()
     search_type = str(args.get("search_type", "general")).strip()
     
@@ -36,52 +40,53 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
         return "Error: Search query cannot be empty", False
     
     try:
-        # Enhance query based on search type
+        # Enhance query based on search type for better results
         if search_type == "package":
-            # Search for Python package information
-            enhanced_query = f"{query} python package pypi documentation"
+            enhanced_query = f"{query} python package pypi pip install"
         elif search_type == "error":
-            # Search for error solutions
-            enhanced_query = f"{query} solution fix python"
+            enhanced_query = f"{query} python solution error fix troubleshoot"
+        elif search_type == "docs":
+            enhanced_query = f"{query} documentation official API"
         else:
             enhanced_query = query
         
-        # Build Google search URL
-        search_url = f"https://www.google.com/search?q={quote(enhanced_query)}"
-        
-        # Try to fetch search results using DuckDuckGo API as fallback (more reliable for automation)
-        try:
-            search_results = _search_duckduckgo(query, search_type)
-            if search_results:
-                return f"Search Results for '{query}':\n\n{search_results}", False
-        except:
-            pass
-        
-        # If DuckDuckGo fails, return Google search URL
-        result = (
-            f"Search URL for '{query}':\n"
-            f"{search_url}\n\n"
-            f"Unable to fetch live results, but you can check the URL above in a browser.\n"
-            f"Key terms to look for: installation, compatibility, documentation, PyPI"
-        )
-        return result, False
+        # Use LangChain if available
+        if LANGCHAIN_AVAILABLE:
+            try:
+                search_engine = DuckDuckGoSearchRun(
+                    max_results=5  # Return top 5 results
+                )
+                results = search_engine.run(enhanced_query)
+                
+                if results and results.strip():
+                    return (
+                        f"Search Results for: {query}\n"
+                        f"{'='*60}\n\n"
+                        f"{results}\n\n"
+                        f"{'='*60}\n"
+                        f"Note: These are the most relevant results from the web. "
+                        f"Look for installation instructions, compatibility notes, or solutions."
+                    ), False
+                else:
+                    return (
+                        f"No results found for '{query}'. "
+                        f"Try rephrasing your query or searching for related topics."
+                    ), False
+                    
+            except Exception as e:
+                # Fallback to URL if LangChain fails
+                return _fallback_search(query, enhanced_query, str(e))
+        else:
+            return _fallback_search(query, enhanced_query, "LangChain not installed")
         
     except Exception as e:
         return f"Error during search: {str(e)}", False
 
 
-def _search_duckduckgo(query: str, search_type: str) -> str:
-    """Try to get search results from DuckDuckGo API"""
+def _fallback_search(query: str, enhanced_query: str, error_msg: str) -> Tuple[str, bool]:
+    """Fallback search using requests library"""
     try:
-        # Enhance query
-        if search_type == "package":
-            enhanced_query = f"{query} python package pypi"
-        elif search_type == "error":
-            enhanced_query = f"{query} python solution fix"
-        else:
-            enhanced_query = query
-        
-        # DuckDuckGo API endpoint
+        # Try to get results from DuckDuckGo API
         url = "https://api.duckduckgo.com/"
         params = {
             "q": enhanced_query,
@@ -91,24 +96,51 @@ def _search_duckduckgo(query: str, search_type: str) -> str:
         response = requests.get(url, params=params, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            
-            # Extract relevant results
             results = []
             
             # Add abstract if available
-            if data.get("Abstract"):
-                results.append(f"Summary: {data['Abstract']}")
+            if data.get("AbstractText"):
+                results.append(f"Summary:\n{data['AbstractText']}\n")
             
             # Add related topics
             if data.get("RelatedTopics"):
-                results.append("\nRelated Topics:")
-                for topic in data["RelatedTopics"][:3]:
+                results.append("Related Information:")
+                for topic in data["RelatedTopics"][:5]:
                     if isinstance(topic, dict) and topic.get("Text"):
-                        text = topic["Text"][:150]  # Truncate to 150 chars
-                        results.append(f"  • {text}")
+                        text = topic["Text"][:200]
+                        if topic.get("FirstURL"):
+                            results.append(f"  - {text}\n    Link: {topic['FirstURL']}")
+                        else:
+                            results.append(f"  - {text}")
             
             if results:
-                return "\n".join(results)
+                return (
+                    f"Search Results for: {query}\n"
+                    f"{'='*60}\n\n"
+                    f"{''.join(results)}\n\n"
+                    f"{'='*60}\n"
+                    f"Note: Using fallback search. Results should be relevant to your query."
+                ), False
+        
+        # If API fails, return helpful message
+        return (
+            f"Could not fetch live search results (reason: {error_msg})\n\n"
+            f"However, for '{query}', you might want to check:\n"
+            f"  - PyPI.org - for Python packages\n"
+            f"  - Official documentation of the package\n"
+            f"  - Stack Overflow or GitHub issues\n"
+            f"  - Package compatibility matrices\n\n"
+            f"Try rephrasing your query or search manually on these resources."
+        ), False
+        
+    except Exception as e:
+        return (
+            f"Error fetching search results: {str(e)}\n\n"
+            f"Suggestions:\n"
+            f"  - Check your internet connection\n"
+            f"  - Try a simpler search query\n"
+            f"  - Look for the package documentation online"
+        ), False
         
         return None
     except:
