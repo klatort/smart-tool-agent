@@ -1,6 +1,7 @@
 """Main Living CLI Agent orchestrator"""
 import requests
 import json
+import time
 from typing import Tuple
 from src.config import API_KEY, API_URL, MODEL_ID, Colors
 from src.managers import ConversationManager, ToolManager
@@ -15,6 +16,11 @@ class Agent:
         self.api_key = api_key
         self.api_url = api_url
         self.model_id = model_id
+        self.log_path = "agent_chat.log"
+        self.session_start = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Log session start
+        self._log_event("session_start", {"model": model_id, "session_time": self.session_start})
         
         self.conversation = ConversationManager(
             system_prompt=(
@@ -91,6 +97,13 @@ class Agent:
                 "- When you want to use a tool, just express intent - the system handles the format\n"
                 "- DO NOT manually write JSON or use tags like <tool_call>, <tool_sep>, etc.\n"
                 "- The API will automatically handle tool formatting\n"
+                "- DO: Clearly name the tool and its arguments; the API builds the function call\n"
+                "- Example: read_file with file_path='D:/Documents/Reports/Attendance/file.xlsx'\n"
+                "- Example: install_package with package='openpyxl'\n"
+                "- Example: create_tool with name='my_tool', description='...', parameters={...}, implementation='...'\n"
+                "- DO: Clearly name the tool and provide arguments; the API builds the call\n"
+                "- DO NOT: Output raw JSON/XML or pseudo calls in text (e.g., read_file \"path\")\n"
+                "- Example: If you need to read a file, just state: read_file with file_path='path' (no JSON/XML tags)\n"
                 "\n"
                 "TOOL SYNTHESIS: If a task would benefit from a custom tool that doesn't exist, use "
                 "'create_tool' to synthesize a new tool. Provide name, description, JSON schema for parameters, "
@@ -150,6 +163,16 @@ class Agent:
         
         # Add tools list to context for duplicate prevention
         self.available_tools = self.tool_manager.get_tool_definitions()
+
+    def _log_event(self, kind: str, payload: dict):
+        """Append structured logs to agent_chat.log for troubleshooting."""
+        try:
+            record = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, **payload}
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            # Logging should never break the agent
+            pass
     
     def run(self):
         """Main chat loop"""
@@ -194,6 +217,7 @@ class Agent:
                 
                 # Add to conversation
                 self.conversation.add_user_message(user_input)
+                self._log_event("user", {"message": user_input})
                 
                 # Make API request
                 should_exit = self._handle_turn()
@@ -251,7 +275,15 @@ class Agent:
             
             # Stream the response
             stream_received_data = False
+            stream_content = ""
             try:
+                self._log_event("api_request", {
+                    "step": step,
+                    "max_tokens": payload["max_tokens"],
+                    "temperature": payload["temperature"],
+                    "num_messages": len(payload["messages"])
+                })
+                
                 with requests.post(self.api_url, headers=headers, json=payload, stream=True, timeout=60) as response:
                     response.raise_for_status()
                     
@@ -264,16 +296,19 @@ class Agent:
                         stream_received_data = True
                         
                         if delta.get('done'):
+                            self._log_event("stream_complete", {"step": step, "content_length": len(stream_content)})
                             break
                         
                         # Print text on all steps
                         text = self.stream_parser.handle_delta(delta)
                         if text:
+                            stream_content += text
                             print(text, end="", flush=True)
                 
                 # Check if stream was completely empty
                 if not stream_received_data:
                     print(f"{Colors.YELLOW}[Warning]: Stream had no data. Retrying...{Colors.RESET}\n")
+                    self._log_event("stream_empty", {"step": step})
                     if step < max_steps:
                         continue
                     else:
@@ -295,20 +330,44 @@ class Agent:
             # Check for empty response - could indicate stream parsing issue
             if not result or (result["type"] == "text" and not result.get("content", "").strip()):
                 print(f"{Colors.YELLOW}[Warning]: Received empty response from API. Retrying...{Colors.RESET}\n")
+                self._log_event("empty_response", {
+                    "step": step,
+                    "result": result
+                })
                 if step < max_steps:
                     # Reset and try again
                     self.stream_parser.reset()
                     continue
                 else:
                     print(f"{Colors.RED}[Error]: Max retries reached with empty responses{Colors.RESET}")
+                    self._log_event("max_retries_empty", {"step": step})
                     return False
+            
+            # Log the parsing result
+            if result["type"] == "tool_calls":
+                self._log_event("parsed_tool_calls", {
+                    "step": step,
+                    "tool_count": len(result.get("tool_calls", [])),
+                    "tools": [tc.get("function_name") for tc in result.get("tool_calls", [])]
+                })
+            else:
+                self._log_event("parsed_text_response", {
+                    "step": step,
+                    "response_length": len(result.get("content", ""))
+                })
             
             if result["type"] == "tool_calls":
                 # Agent decided to use a tool
                 tool_calls = result["tool_calls"]
                 if not tool_calls:
                     print(f"{Colors.RED}[Error]: Failed to parse tool calls{Colors.RESET}")
-                    return False
+                    print(f"{Colors.YELLOW}[Recovery]: Asking the agent to re-issue the tool call with valid JSON arguments and shorter payload if large.{Colors.RESET}\n")
+                    self.conversation.add_user_message(
+                        "Your previous tool call arguments were malformed or too long. "
+                        "Re-issue the tool call now with valid JSON arguments only (no extra text), keep payload concise, and let the API format it. "
+                        "If you need to send code, keep it minimal and valid JSON."
+                    )
+                    continue
                 
                 # Add agent's tool use to conversation (empty content for tool-only messages)
                 self.conversation.add_assistant_message("")
@@ -455,6 +514,12 @@ class Agent:
                     print(f"{Colors.YELLOW}This suggests the current approach isn't working.{Colors.RESET}\n")
                     print(f"{Colors.CYAN}💡 Agent needs to try a different strategy or explain the problem.{Colors.RESET}\n")
                     
+                    self._log_event("consecutive_errors_intervention", {
+                        "step": step,
+                        "consecutive_errors": consecutive_errors,
+                        "recent_failed_tools": [tc["function_name"] for tc in tool_calls[-3:]]
+                    })
+
                     # Add intervention to force reflection
                     self.conversation.add_user_message(
                         f"IMPORTANT: You've had {consecutive_errors} consecutive failed tool calls. "
@@ -525,20 +590,74 @@ class Agent:
                     print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
                     print(f"{Colors.RED}❌ ERROR: Invalid Tool Calling Format Detected{Colors.RESET}")
                     print(f"{Colors.RED}{'='*70}{Colors.RESET}")
-                    print(f"{Colors.YELLOW}The agent is outputting XML/JSON syntax instead of using the API properly.{Colors.RESET}")
-                    print(f"{Colors.YELLOW}This usually happens when the conversation gets too complex.{Colors.RESET}\n")
-                    print(f"{Colors.CYAN}💡 Recommendation: Start a new conversation or rephrase your request.{Colors.RESET}\n")
-                    
-                    # Stop the loop - recovery hasn't worked
-                    return False
+                    print(f"{Colors.YELLOW}The agent emitted XML/JSON tool syntax instead of using the API properly.{Colors.RESET}")
+                    print(f"{Colors.YELLOW}Recovery: Forcing a retry with a clear instruction to call tools via function-calling (no raw JSON/XML).{Colors.RESET}\n")
+
+                    self._log_event("malformed_syntax_detected", {
+                        "step": step,
+                        "response_snippet": response_text[:200],
+                        "pattern_detected": [p for p in malformed_patterns if p in response_text]
+                    })
+
+                    # Inject guidance so the model fixes itself without asking the user
+                    self.conversation.add_user_message(
+                        "Your last reply used invalid tool syntax (XML/JSON). Correct format reminder:"
+                        " 1) Decide the tool you need from the provided definitions."
+                        " 2) State the tool name and arguments; the API will format the function-call."
+                        " 3) Do NOT emit raw JSON, XML, <tool_call>, <function_call>, or {\"name\":...} payloads."
+                        " 4) If no tool is needed, answer in plain text."
+                        " 5) Proceed now using proper function calling; do not ask to restart or change the prompt."
+                        " Example of correct call: read_file with file_path='D:/data/foo.txt' (the API handles formatting)."
+                    )
+                    continue
+
+                # Detect plain-text pseudo tool calls like "read_file <path>" that should have been real calls
+                tool_names = [t["function"]["name"] for t in self.tool_manager.get_tool_definitions()]
+                lowered = response_text.lower()
+                pseudo_call = False
+                for name in tool_names:
+                    if lowered.startswith(f"{name} ") or lowered.startswith(f"{name}(") or lowered.startswith(f"{name}{{") or f"{name}(" in lowered:
+                        pseudo_call = True
+                        break
+                if pseudo_call:
+                    print(f"{Colors.YELLOW}[Warning]: Assistant described a tool call in text instead of executing it.{Colors.RESET}\n")
+                    self._log_event("pseudo_tool_call_detected", {
+                        "step": step,
+                        "response_snippet": response_text[:200],
+                        "detected_tools": [name for name in tool_names if name in lowered]
+                    })
+                    self.conversation.add_user_message(
+                        "You wrote a plain-text tool call instead of executing it. Call the tool now using function calling; "
+                        "do not repeat the text. Use the same arguments you intended."
+                        " Example: If you meant read_file('path'), call read_file with file_path='path' so the API executes it."
+                    )
+                    continue
                 
                 self.conversation.add_assistant_message(response_text)
                 if tool_execution_count > 0:
                     print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
                     print(f"{Colors.GREEN}✅ Task Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
                     print(f"{Colors.GREEN}{'─'*70}{Colors.RESET}\n")
+                    
+                    self._log_event("task_complete", {
+                        "step": step,
+                        "tool_count": tool_execution_count,
+                        "response_length": len(response_text),
+                        "response_preview": response_text[:300]
+                    })
+                else:
+                    self._log_event("final_response", {
+                        "step": step,
+                        "response_length": len(response_text),
+                        "response_preview": response_text[:300]
+                    })
                 return False
         
         # Max steps reached
         print(f"{Colors.YELLOW}[Warning]: Max agent steps reached ({max_steps}). Task may be incomplete.{Colors.RESET}")
+        self._log_event("max_steps_reached", {
+            "max_steps": max_steps,
+            "tools_executed": tool_execution_count,
+            "final_messages_count": len(self.conversation.get_messages())
+        })
         return False
