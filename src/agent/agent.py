@@ -266,6 +266,7 @@ class Agent:
         last_tool_signature = None  # Track (tool_name, args) to detect loops
         repeat_count = 0  # Count consecutive identical calls
         consecutive_errors = 0  # Track consecutive failed tool calls
+        pseudo_call_count = 0  # Track consecutive pseudo-calls to detect loops
         
         while step < max_steps:
             step += 1
@@ -639,8 +640,33 @@ class Agent:
                         pseudo_call = True
                         break
                 if pseudo_call:
-                    print(f"{Colors.YELLOW}[Warning]: Assistant described a tool call in text instead of executing it.{Colors.RESET}\n")
+                    pseudo_call_count += 1
+                    print(f"{Colors.YELLOW}[Warning]: Assistant described a tool call in text instead of executing it. ({pseudo_call_count} in a row){Colors.RESET}\n")
                     self._log_message("pseudo_tool_call", response_text[:500], f"step_{step}")
+                    
+                    # Circuit breaker: if we've had 3+ pseudo-calls, the agent is fundamentally confused
+                    if pseudo_call_count >= 3:
+                        print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
+                        print(f"{Colors.RED}❌ CIRCUIT BREAKER: Agent stuck in pseudo-call loop{Colors.RESET}")
+                        print(f"{Colors.RED}{'='*70}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}Agent has attempted to describe tool calls {pseudo_call_count} times without using function calling.{Colors.RESET}")
+                        print(f"{Colors.YELLOW}The agent is fundamentally confused about how to invoke tools.{Colors.RESET}\n")
+                        
+                        self._log_message("user", "CRITICAL: You are stuck in a loop describing tools instead of using them. I will create the tool you need. You just use it.", "circuit_breaker_intervention")
+                        
+                        # Force the agent to stop describing and acknowledge it will use function calling
+                        critical_intervention = (
+                            "CRITICAL INTERVENTION: You have attempted to describe tool calls 3 times without actually executing them.\n\n"
+                            "This is a fundamental misunderstanding of how to invoke tools.\n\n"
+                            "IMMEDIATE ACTION REQUIRED:\n"
+                            "You will NOW respond with ONLY the function call using the API's function calling mechanism.\n"
+                            "Do NOT write text. Do NOT describe what you're going to do.\n"
+                            "ONLY EXECUTE THE FUNCTION CALL.\n\n"
+                            "The API will handle the rest. You just need to invoke the function."
+                        )
+                        self.conversation.add_user_message(critical_intervention)
+                        continue
+                    
                     recovery_msg = (
                         "ERROR: You described a tool call as text instead of executing it.\n\n"
                         "What you did: Wrote text like 'read_file with file_path=...'\n"
@@ -651,6 +677,9 @@ class Agent:
                     self.conversation.add_user_message(recovery_msg)
                     self._log_message("user", recovery_msg, "pseudo_call_recovery")
                     continue
+                else:
+                    # Reset pseudo-call counter when we get a successful response
+                    pseudo_call_count = 0
                 
                 self.conversation.add_assistant_message(response_text)
                 self._log_message("assistant", response_text, f"step_{step}_final")
