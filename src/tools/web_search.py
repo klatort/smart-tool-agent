@@ -11,17 +11,17 @@ TOOL_DEF = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the internet for current information about Python packages, troubleshooting, compatibility issues, or technical topics. Use this when encountering unknown packages, compatibility errors, or need up-to-date documentation and solutions.",
+        "description": "General-purpose internet research tool. Search for current information, verify facts, find solutions, research alternatives, get documentation, and troubleshoot issues. Use whenever you need information verification or are uncertain about something.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query (e.g., 'pandas python package installation', 'openpyxl excel compatibility with python', 'how to read xlsx files python 2025')"
+                    "description": "The search query - can be about any topic, problem, or question (e.g., 'how to read Excel files Python', 'numpy performance vs pandas', 'Python asyncio tutorial 2025')"
                 },
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'general' for general web search, 'package' for Python package info, 'error' for error troubleshooting, 'docs' for documentation",
+                    "description": "Type of search: 'general' for web search (default), 'package' for Python package information, 'error' for error/solution lookup, 'docs' for documentation",
                     "enum": ["general", "package", "error", "docs"]
                 }
             },
