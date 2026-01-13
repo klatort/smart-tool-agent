@@ -211,6 +211,7 @@ class Agent:
         tool_execution_count = 0  # Track total tools executed
         last_tool_signature = None  # Track (tool_name, args) to detect loops
         repeat_count = 0  # Count consecutive identical calls
+        consecutive_errors = 0  # Track consecutive failed tool calls
         
         while step < max_steps:
             step += 1
@@ -378,6 +379,12 @@ class Agent:
                         print(f"   {Colors.CYAN}└─ Result:{Colors.RESET} {result_display}")
                         print()  # Blank line for spacing
                         
+                        # Track success/failure
+                        if "Error" in tool_result or "error" in tool_result.lower():
+                            consecutive_errors += 1
+                        else:
+                            consecutive_errors = 0  # Reset on success
+                        
                         # Add full result to conversation
                         self.conversation.add_tool_result(
                             tool_call_id=tool_call["id"],
@@ -393,12 +400,34 @@ class Agent:
                     
                     except Exception as e:
                         error_msg = f"Error executing {func_name}: {str(e)}"
-                        print(f"  {Colors.RED}{error_msg}{Colors.RESET}\n")
+                        print(f"   {Colors.RED}└─ Error:{Colors.RESET} {error_msg}")
+                        print()
                         self.conversation.add_tool_result(
                             tool_call_id=tool_call["id"],
                             function_name=func_name,
                             result=error_msg
                         )
+                        consecutive_errors += 1
+                
+                # Check if agent is stuck with repeated errors
+                if consecutive_errors >= 3:
+                    print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.RED}⚠️  WARNING: Agent appears stuck with repeated errors{Colors.RESET}")
+                    print(f"{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}The agent has failed {consecutive_errors} consecutive tool calls.{Colors.RESET}")
+                    print(f"{Colors.YELLOW}This suggests the current approach isn't working.{Colors.RESET}\n")
+                    print(f"{Colors.CYAN}💡 Agent needs to try a different strategy or explain the problem.{Colors.RESET}\n")
+                    
+                    # Add intervention to force reflection
+                    self.conversation.add_user_message(
+                        f"IMPORTANT: You've had {consecutive_errors} consecutive failed tool calls. "
+                        f"The current approach clearly isn't working. Please STOP and:\\n"
+                        f"1. Explain what's blocking you\\n"
+                        f"2. Tell me what information or capability you're missing\\n"
+                        f"3. Suggest a completely different approach\\n"
+                        f"\\nDo NOT retry the same failed tools. Think differently."
+                    )
+                    consecutive_errors = 0  # Reset after intervention
                 
                 # If any tool requested exit, stop the loop
                 if should_exit:
@@ -435,29 +464,27 @@ class Agent:
                 response_text = result["content"]
                 
                 # Detect if the agent is outputting malformed tool syntax
-                if "<tool_call>" in response_text or "<tool_sep>" in response_text or (response_text.strip().startswith("{") and "\"name\":" in response_text):
-                    print(f"{Colors.RED}[Error]: Agent used malformed tool calling syntax!{Colors.RESET}")
-                    print(f"{Colors.YELLOW}[Recovery]: The agent is confused. Resetting conversation context...{Colors.RESET}\n")
+                malformed_patterns = [
+                    "<tool_call>", "<function_call>", "<tool_sep>", "</tool_call>", "</function_call>",
+                    "<invoke>", "</invoke>"
+                ]
+                has_malformed = any(pattern in response_text for pattern in malformed_patterns)
+                
+                # Also check for raw JSON function calls at start
+                if not has_malformed and response_text.strip().startswith("{"):
+                    if '"name":' in response_text or '"function"' in response_text or '"arguments"' in response_text:
+                        has_malformed = True
+                
+                if has_malformed:
+                    print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.RED}❌ ERROR: Invalid Tool Calling Format Detected{Colors.RESET}")
+                    print(f"{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}The agent is outputting XML/JSON syntax instead of using the API properly.{Colors.RESET}")
+                    print(f"{Colors.YELLOW}This usually happens when the conversation gets too complex.{Colors.RESET}\n")
+                    print(f"{Colors.CYAN}💡 Recommendation: Start a new conversation or rephrase your request.{Colors.RESET}\n")
                     
-                    # Clear recent problematic messages to reset context
-                    messages = self.conversation.get_messages()
-                    if len(messages) > 5:
-                        # Keep system prompt and last 2 user messages only
-                        system_msg = messages[0]
-                        recent_user_msgs = [m for m in messages[-4:] if m["role"] == "user"]
-                        self.conversation.messages = [system_msg] + recent_user_msgs[-2:]
-                    
-                    # Add clear instruction
-                    self.conversation.add_user_message(
-                        "CRITICAL ERROR: You are not using the correct tool calling format. "
-                        "This API uses standard OpenAI-compatible function calling. "
-                        "When you want to use a tool, the system automatically formats it for you. "
-                        "Just indicate which tool you want to use through the proper API mechanism. "
-                        "DO NOT output raw JSON or tags like <tool_call>. "
-                        "Please respond to my original request now."
-                    )
-                    # Continue loop to let agent retry with cleaned context
-                    continue
+                    # Stop the loop - recovery hasn't worked
+                    return False
                 
                 self.conversation.add_assistant_message(response_text)
                 if tool_execution_count > 0:
