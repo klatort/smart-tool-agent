@@ -1,5 +1,3 @@
-# Current time: 2026-01-12 18:38:02
-# Last modified: 2026-01-12 18:24:06
 """
 Living CLI Agent - Main Entry Point
 """

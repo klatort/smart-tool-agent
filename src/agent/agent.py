@@ -55,6 +55,22 @@ class Agent:
                 "- Nothing is impossible - you can always create tools\n"
                 "- But first, check if a tool already exists that can help\n"
                 "\n"
+                "YOUR CORE TOOLS (Use these FIRST before creating new tools):\n"
+                "1. read_file (path) - Read file contents, check if file exists, list directories\n"
+                "   Example: Check 'enhanced_mona_lisa.png' exists by reading the directory\n"
+                "   STOP CREATING: check_file_exists, list_directory - use read_file instead!\n"
+                "2. write_file (path, content) - Create or modify files\n"
+                "3. open_browser (url) - Open URLs in browser or fetch web content\n"
+                "4. get_current_time () - Get current date/time\n"
+                "5. install_package (package, version) - Install Python dependencies\n"
+                "6. create_tool (name, description, parameters, implementation) - Synthesize new tools\n"
+                "7. update_tool (name, implementation) - Fix or improve existing tools\n"
+                "8. remove_tool (name) - Delete auto-generated tools\n"
+                "9. end_chat () - End the conversation (ONLY when task is complete or user exits)\n"
+                "\n"
+                "IMPORTANT: When you think 'I need to check if a file exists', just use read_file to check the directory.\n"
+                "DO NOT create check_file_exists, list_files, or similar - these are covered by read_file!\n"
+                "\n"
                 "IMPORTANT: Between tool calls, think about what you learned and what you need to do next.\n"
                 "\n"
                 "CRITICAL REASONING RULES:\n"
@@ -117,6 +133,9 @@ class Agent:
         )
         self.tool_manager = ToolManager()
         self.stream_parser = StreamParser()
+        
+        # Add tools list to context for duplicate prevention
+        self.available_tools = self.tool_manager.get_tool_definitions()
     
     def run(self):
         """Main chat loop"""
@@ -305,6 +324,21 @@ class Agent:
                         last_tool_used = func_name
                         continue
                     
+                    # Check if agent is trying to create a tool that already exists
+                    if func_name == "create_tool":
+                        tool_name = args.get("name", "").strip()
+                        existing_tools = [t["function"]["name"] for t in self.available_tools]
+                        
+                        if tool_name in existing_tools:
+                            print(f"{Colors.RED}[Warning]: Tool '{tool_name}' already exists!{Colors.RESET}\n")
+                            self.conversation.add_tool_result(
+                                tool_call_id=tool_call["id"],
+                                function_name=func_name,
+                                result=f"ERROR: Tool '{tool_name}' already exists! You should update it with 'update_tool' instead, or use a different name. Existing tools: {', '.join(existing_tools)}"
+                            )
+                            last_tool_used = func_name
+                            continue
+                    
                     print(f"{Colors.YELLOW}[Tool {i}/{len(tool_calls)}]: {func_name}{Colors.RESET}")
                     print(f"  {Colors.CYAN}Args: {args}{Colors.RESET}")
                     
@@ -369,46 +403,6 @@ class Agent:
             else:
                 # Agent decided to respond with text
                 response_text = result["content"]
-                
-                # Detect hallucination patterns
-                hallucination_patterns = [
-                    ("check", "directory", "successfully"),
-                    ("confirm", "file", "exist"),
-                    ("I can see", "directory"),
-                    ("looking at", "file"),
-                    ("the files are", "list"),
-                    ("I found", "directory"),
-                ]
-                
-                response_lower = response_text.lower()
-                suspicious_phrases = [
-                    "i can confirm",
-                    "i can see",
-                    "the file",
-                    "files in",
-                    "directory contains",
-                ]
-                
-                # Check if agent is claiming to have verified something without using tools
-                has_suspicious = any(phrase in response_lower for phrase in suspicious_phrases)
-                
-                # Check if recent messages had tool calls
-                recent_messages = self.conversation.get_messages()[-6:]
-                recent_tool_calls = [m for m in recent_messages if m.get("role") == "tool"]
-                
-                # If agent makes claims about verification but no recent tool calls, warn
-                if has_suspicious and not recent_tool_calls and "check" in response_lower:
-                    print(f"{Colors.RED}[Warning]: Agent is making unverified claims about system state!{Colors.RESET}")
-                    print(f"{Colors.YELLOW}[Recovery]: Asking agent to verify with actual tool calls...{Colors.RESET}\n")
-                    
-                    self.conversation.add_assistant_message("")
-                    self.conversation.add_user_message(
-                        f"VERIFICATION REQUIRED: You claimed to check something, but I don't see any actual tool calls. "
-                        f"You wrote: '{response_text[:100]}...' "
-                        f"Please use actual tools to verify, don't guess. "
-                        f"What tools did you use to gather this information?"
-                    )
-                    continue
                 
                 # Detect if the agent is outputting malformed tool syntax
                 if "<tool_call>" in response_text or "<tool_sep>" in response_text or (response_text.strip().startswith("{") and "\"name\":" in response_text):

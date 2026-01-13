@@ -41,9 +41,9 @@ class ToolManager:
     
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Get all tool definitions for API request (includes auto-tools)"""
-        static_tools = get_tools()
-        auto_tools = self.auto_registry.get_tools()
-        return static_tools + auto_tools
+        # get_tools() already includes auto-tools via _load_auto_tools()
+        # No need to add auto_registry tools again - they're already included
+        return get_tools()
     
     def execute_tool(self, function_name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
         """
