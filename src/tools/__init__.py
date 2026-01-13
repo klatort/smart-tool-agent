@@ -11,6 +11,7 @@ from .read_file import TOOL_DEF as READ_FILE_DEF, execute as read_file_execute
 from .write_file import TOOL_DEF as WRITE_FILE_DEF, execute as write_file_execute
 from .create_tool import TOOL_DEF as CREATE_TOOL_DEF, execute as create_tool_execute
 from .update_tool import TOOL_DEF as UPDATE_TOOL_DEF, execute as update_tool_execute
+from .install_package import TOOL_DEF as INSTALL_PACKAGE_DEF, execute as install_package_execute
 
 TOOLS_DIR = Path(__file__).parent
 AUTO_DIR = TOOLS_DIR / "auto"
@@ -44,6 +45,7 @@ def get_tools() -> List[Dict[str, Any]]:
         WRITE_FILE_DEF,
         CREATE_TOOL_DEF,
         UPDATE_TOOL_DEF,
+        INSTALL_PACKAGE_DEF,
     ]
     auto_defs, _ = _load_auto_tools()
     return base + auto_defs
@@ -58,6 +60,7 @@ def get_tool_functions() -> Dict[str, Callable]:
         "write_file": write_file_execute,
         "create_tool": create_tool_execute,
         "update_tool": update_tool_execute,
+        "install_package": install_package_execute,
     }
     _, auto_funcs = _load_auto_tools()
     base.update(auto_funcs)
