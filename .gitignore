@@ -9,6 +9,10 @@ __pycache__/
 venv/
 .env
 
+# Auto-generated tools
+src/tools/auto/*.py
+!src/tools/auto/__init__.py
+
 # OS
 .DS_Store
 Thumbs.db
