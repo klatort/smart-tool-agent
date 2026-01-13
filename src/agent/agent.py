@@ -1,5 +1,6 @@
 """Main Living CLI Agent orchestrator"""
 import requests
+import json
 from typing import Tuple
 from src.config import API_KEY, API_URL, MODEL_ID, Colors
 from src.managers import ConversationManager, ToolManager
