@@ -24,7 +24,7 @@ TOOL_DEF = {
                 },
                 "implementation": {
                     "type": "string",
-                    "description": "Python function body that receives 'args' dict and returns Tuple[str, bool]. Must return (result_message: str, should_exit: bool)"
+                    "description": "Python function body that receives 'args' dict and returns Tuple[str, bool]. CRITICAL: EVERY return statement MUST return exactly 2 values: (result_message: str, should_exit: bool). Example: return 'Success: data processed', False"
                 },
                 "safety_notes": {
                     "type": "string",
