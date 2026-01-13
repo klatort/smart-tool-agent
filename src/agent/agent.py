@@ -139,8 +139,30 @@ class Agent:
     
     def run(self):
         """Main chat loop"""
-        print(f"{Colors.CYAN}--- Connected to {self.model_id} ---{Colors.RESET}")
-        print(f"{Colors.YELLOW}Available tools: browser, time, files, end_chat{Colors.RESET}\n")
+        print(f"\n{Colors.CYAN}{'='*70}{Colors.RESET}")
+        print(f"{Colors.CYAN}  Living CLI Agent - Connected to {self.model_id}{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
+        
+        # Display available tools in organized categories
+        tool_names = [t["function"]["name"] for t in self.available_tools]
+        
+        print(f"{Colors.YELLOW}📦 Available Tools ({len(tool_names)} total):{Colors.RESET}")
+        print(f"{Colors.CYAN}  Core:{Colors.RESET} read_file, write_file, open_browser, get_current_time")
+        print(f"{Colors.CYAN}  Mgmt:{Colors.RESET} create_tool, update_tool, remove_tool, install_package")
+        
+        # Show custom tools if any exist
+        custom_tools = [t for t in tool_names if t not in [
+            "end_chat", "open_browser", "get_current_time", "read_file", "write_file",
+            "create_tool", "update_tool", "install_package", "remove_tool"
+        ]]
+        if custom_tools:
+            custom_str = ", ".join(custom_tools[:5])  # Show first 5
+            if len(custom_tools) > 5:
+                custom_str += f" (+{len(custom_tools)-5} more)"
+            print(f"{Colors.CYAN}  Custom:{Colors.RESET} {custom_str}")
+        
+        print(f"\n{Colors.GREEN}💡 Type your request or 'exit' to quit{Colors.RESET}")
+        print(f"{Colors.CYAN}{'-'*70}{Colors.RESET}\n")
         
         last_tool_used = None  # Track last tool to prevent consecutive update_tool calls
         last_tool_call = None  # Track last tool+args to detect infinite loops
@@ -204,10 +226,10 @@ class Agent:
             
             # Only print "Assistant:" on first step
             if step == 1:
-                print(f"{Colors.CYAN}Assistant: {Colors.RESET}", end="", flush=True)
+                print(f"\n{Colors.CYAN}🤖 Assistant:{Colors.RESET} ", end="", flush=True)
             elif step > 1:
                 # On reasoning steps, show what the agent is thinking
-                print(f"{Colors.CYAN}[Agent reasoning]: {Colors.RESET}", end="", flush=True)
+                print(f"\n{Colors.CYAN}🧠 Reasoning (Step {step}):{Colors.RESET} ", end="", flush=True)
             
             # Reset stream parser
             self.stream_parser.reset()
@@ -254,7 +276,9 @@ class Agent:
                 self.conversation.add_assistant_message("")
                 
                 # Execute the tools with step tracking
-                print(f"\n{Colors.YELLOW}[Executing {len(tool_calls)} tool(s) at step {step}...]{Colors.RESET}\n")
+                print(f"\n{Colors.YELLOW}{'─'*70}{Colors.RESET}")
+                print(f"{Colors.YELLOW}⚡ Executing {len(tool_calls)} Tool(s) - Step {step}/{max_steps}{Colors.RESET}")
+                print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}\n")
                 
                 should_exit = False
                 for i, tool_call in enumerate(tool_calls, 1):
@@ -339,8 +363,11 @@ class Agent:
                             last_tool_used = func_name
                             continue
                     
-                    print(f"{Colors.YELLOW}[Tool {i}/{len(tool_calls)}]: {func_name}{Colors.RESET}")
-                    print(f"  {Colors.CYAN}Args: {args}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}🔧 Tool {i}/{len(tool_calls)}: {Colors.RESET}{Colors.CYAN}{func_name}{Colors.RESET}")
+                    if args:
+                        print(f"   {Colors.CYAN}├─ Args:{Colors.RESET} {args}")
+                    else:
+                        print(f"   {Colors.CYAN}├─ Args:{Colors.RESET} (none)")
                     
                     try:
                         tool_result, exit_flag = self.tool_manager.execute_tool(func_name, args)
@@ -348,7 +375,8 @@ class Agent:
                         # Format and display the result (truncate if needed)
                         formatted_result = format_tool_result(tool_result, func_name)
                         result_display = truncate_text(tool_result, max_length=300)
-                        print(f"  {Colors.YELLOW}Result: {result_display}{Colors.RESET}\n")
+                        print(f"   {Colors.CYAN}└─ Result:{Colors.RESET} {result_display}")
+                        print()  # Blank line for spacing
                         
                         # Add full result to conversation
                         self.conversation.add_tool_result(
@@ -378,7 +406,9 @@ class Agent:
                 
                 # Show what's next
                 if step == 1:
-                    print(f"{Colors.CYAN}[Agent analyzing results...]{Colors.RESET}\n")
+                    print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}")
+                    print(f"{Colors.CYAN}📊 Analyzing results...{Colors.RESET}")
+                    print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}\n")
                 
                 # After first tool execution, if we got good results, push agent to respond
                 # by injecting a message asking to summarize findings
@@ -431,7 +461,9 @@ class Agent:
                 
                 self.conversation.add_assistant_message(response_text)
                 if tool_execution_count > 0:
-                    print(f"{Colors.CYAN}[Task complete: Executed {tool_execution_count} tool(s) across {step} step(s)]{Colors.RESET}\n")
+                    print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
+                    print(f"{Colors.GREEN}✅ Task Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
+                    print(f"{Colors.GREEN}{'─'*70}{Colors.RESET}\n")
                 return False
         
         # Max steps reached
