@@ -19,12 +19,22 @@ class Agent:
         self.conversation = ConversationManager(
             system_prompt=(
                 "You are a helpful assistant with access to tools that can extend dynamically. "
+                "YOU CAN CREATE ANY TOOL YOU NEED - this is your superpower.\n"
+                "\n"
                 "Use the agentic reasoning approach:\n"
                 "1. When given a task, identify which tools you need to accomplish it\n"
-                "2. Call the first tool needed to gather information\n"
-                "3. After each tool executes, analyze the result carefully\n"
-                "4. Decide the next action: call another tool to continue, or respond if complete\n"
-                "5. Repeat until the task is fully completed\n"
+                "2. If you don't have a tool, CREATE IT using the 'create_tool' function\n"
+                "3. Call the tool needed to gather information or complete the task\n"
+                "4. After each tool executes, analyze the result carefully\n"
+                "5. Decide the next action: call another tool to continue, or respond if complete\n"
+                "6. Repeat until the task is fully completed\n"
+                "\n"
+                "CRITICAL - NEVER GIVE UP:\n"
+                "- NEVER say 'I can't do this' or 'this is beyond my capabilities'\n"
+                "- NEVER call end_chat just because a tool doesn't exist\n"
+                "- If you need image generation, FILE operations, ANYTHING: CREATE A TOOL\n"
+                "- The only reason to give up is if the user explicitly cancels\n"
+                "- Always try: create_tool → use_tool → analyze_results → repeat\n"
                 "\n"
                 "CRITICAL - HONESTY AND LIMITATIONS:\n"
                 "- NEVER guess or hallucinate information. Always use tools to verify facts.\n"
@@ -232,6 +242,26 @@ class Agent:
                     tool_execution_count += 1
                     func_name = tool_call["function_name"]
                     args = tool_call["arguments"]
+                    
+                    # Detect premature end_chat without even trying to solve the problem
+                    if func_name == "end_chat" and step == 1:
+                        reason = str(args.get("reason", "")).lower()
+                        # Check if agent is giving up on solvable problems
+                        give_up_patterns = ["capability", "can't", "cannot", "unable", "beyond", "don't have", "not available"]
+                        if any(pattern in reason for pattern in give_up_patterns):
+                            print(f"{Colors.RED}[INTERVENTION]: Agent tried to give up without attempting to solve!{Colors.RESET}")
+                            print(f"{Colors.YELLOW}[Recovery]: You have create_tool - use it to solve the problem!{Colors.RESET}\n")
+                            
+                            # Inject strong message
+                            self.conversation.add_assistant_message("")
+                            self.conversation.add_user_message(
+                                f"STOP: You were about to give up with reason '{reason}', but you CAN solve this! "
+                                f"You have the 'create_tool' function which lets you build ANY tool you need. "
+                                f"If you don't have image generation, create it. "
+                                f"If you don't have something, build it. "
+                                f"DO NOT call end_chat - try to accomplish the task instead."
+                            )
+                            continue
                     
                     # Create signature for this tool call
                     tool_signature = (func_name, json.dumps(args, sort_keys=True))
