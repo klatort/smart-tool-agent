@@ -12,8 +12,7 @@ class AutoToolsRegistry:
     
     def __init__(self, sandbox: ToolSandbox = None):
         self.sandbox = sandbox or ToolSandbox()
-        self.auto_tools_dir = Path(__file__).parent / "auto"
-        self.auto_tools_dir.mkdir(exist_ok=True)
+        self.auto_tools_dir = Path(__file__).parent
         self.registered_tools: Dict[str, Dict[str, Any]] = {}  # name -> {def, func, module_path}
         self.load_existing_auto_tools()
     

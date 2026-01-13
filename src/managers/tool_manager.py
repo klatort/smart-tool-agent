@@ -17,6 +17,8 @@ class ToolManager:
     
     def reload_tools(self):
         """Reload tool definitions and functions (after auto tool creation)."""
+        # Reinitialize auto-tools registry to pick up newly created tools
+        self.auto_registry = AutoToolsRegistry()
         self.tools = get_tools()
         self.tool_functions = get_tool_functions()
     
