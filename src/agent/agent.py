@@ -26,6 +26,25 @@ class Agent:
                 "4. Decide the next action: call another tool to continue, or respond if complete\n"
                 "5. Repeat until the task is fully completed\n"
                 "\n"
+                "CRITICAL - HONESTY AND LIMITATIONS:\n"
+                "- NEVER guess or hallucinate information. Always use tools to verify facts.\n"
+                "- If you don't know something, use a tool to check instead of guessing\n"
+                "- NEVER claim a tool succeeded if you didn't actually call it\n"
+                "- NEVER make up file contents, directory listings, or system information\n"
+                "- If a tool returns no results, the answer is unknown - don't invent data\n"
+                "- When checking directories, file existence, or system state: ALWAYS use appropriate tools\n"
+                "\n"
+                "TOOL USAGE HIERARCHY:\n"
+                "1. Check what tools you ALREADY HAVE - use existing tools first\n"
+                "2. If you need something you can't do, CREATE A TOOL for it (not instead of existing tools)\n"
+                "3. Never create a tool when an existing tool can do the job\n"
+                "4. Example: Don't create 'list_directory' if 'files' tool already exists\n"
+                "\n"
+                "CAPABILITY REFRAMING:\n"
+                "- Instead of 'I can't do X': Think 'I can create a tool to do X'\n"
+                "- Nothing is impossible - you can always create tools\n"
+                "- But first, check if a tool already exists that can help\n"
+                "\n"
                 "IMPORTANT: Between tool calls, think about what you learned and what you need to do next.\n"
                 "\n"
                 "CRITICAL REASONING RULES:\n"
@@ -320,6 +339,46 @@ class Agent:
             else:
                 # Agent decided to respond with text
                 response_text = result["content"]
+                
+                # Detect hallucination patterns
+                hallucination_patterns = [
+                    ("check", "directory", "successfully"),
+                    ("confirm", "file", "exist"),
+                    ("I can see", "directory"),
+                    ("looking at", "file"),
+                    ("the files are", "list"),
+                    ("I found", "directory"),
+                ]
+                
+                response_lower = response_text.lower()
+                suspicious_phrases = [
+                    "i can confirm",
+                    "i can see",
+                    "the file",
+                    "files in",
+                    "directory contains",
+                ]
+                
+                # Check if agent is claiming to have verified something without using tools
+                has_suspicious = any(phrase in response_lower for phrase in suspicious_phrases)
+                
+                # Check if recent messages had tool calls
+                recent_messages = self.conversation.get_messages()[-6:]
+                recent_tool_calls = [m for m in recent_messages if m.get("role") == "tool"]
+                
+                # If agent makes claims about verification but no recent tool calls, warn
+                if has_suspicious and not recent_tool_calls and "check" in response_lower:
+                    print(f"{Colors.RED}[Warning]: Agent is making unverified claims about system state!{Colors.RESET}")
+                    print(f"{Colors.YELLOW}[Recovery]: Asking agent to verify with actual tool calls...{Colors.RESET}\n")
+                    
+                    self.conversation.add_assistant_message("")
+                    self.conversation.add_user_message(
+                        f"VERIFICATION REQUIRED: You claimed to check something, but I don't see any actual tool calls. "
+                        f"You wrote: '{response_text[:100]}...' "
+                        f"Please use actual tools to verify, don't guess. "
+                        f"What tools did you use to gather this information?"
+                    )
+                    continue
                 
                 # Detect if the agent is outputting malformed tool syntax
                 if "<tool_call>" in response_text or "<tool_sep>" in response_text or (response_text.strip().startswith("{") and "\"name\":" in response_text):
