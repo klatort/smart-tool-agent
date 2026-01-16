@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Callable, Any, Optional, Tuple
 from src.tools.synthesis import validate_spec, generate_tool_module, indent_code
-from src.tools.sandbox import ToolSandbox
+from src.utils.sandbox import ToolSandbox
 
 
 class AutoToolsRegistry:

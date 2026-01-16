@@ -2,15 +2,109 @@
 import requests
 import json
 import time
+import sys
+import io
 from typing import Tuple
 from src.config import API_KEY, API_URL, MODEL_ID, Colors
 from src.managers import ConversationManager, ToolManager
 from src.parsers import StreamParser
 from src.utils import format_tool_result, truncate_text
+from src.utils.api_logger import log_request, log_response, clear_log
+from src.tools.planning import set_agent_state, get_agent_state
+from src.tools import get_broken_tools
+
+# Fix Windows terminal encoding for Unicode
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+
+class ThoughtParser:
+    """Parses and formats [THOUGHT] blocks from agent output in magenta"""
+    
+    def __init__(self):
+        self.in_thought_block = False
+        self.buffer = ""
+    
+    def process_text(self, text: str) -> str:
+        """
+        Process streaming text and format [THOUGHT] blocks in magenta.
+        Returns the formatted text to print.
+        """
+        result = ""
+        i = 0
+        
+        while i < len(text):
+            if not self.in_thought_block:
+                # Look for [THOUGHT] marker
+                remaining = text[i:]
+                if remaining.upper().startswith("[THOUGHT]"):
+                    self.in_thought_block = True
+                    self.buffer = ""
+                    result += f"{Colors.MAGENTA}[THOUGHT]{Colors.RESET}{Colors.MAGENTA}"
+                    i += len("[THOUGHT]")
+                    continue
+                elif remaining.upper().startswith("[THOUGHT:"):
+                    self.in_thought_block = True
+                    self.buffer = ""
+                    result += f"{Colors.MAGENTA}[THOUGHT:"
+                    i += len("[THOUGHT:")
+                    continue
+                else:
+                    result += text[i]
+                    i += 1
+            else:
+                # Inside a thought block
+                char = text[i]
+                
+                # End thought on newline followed by non-space, or closing bracket
+                if char == '\n':
+                    remaining = text[i+1:] if i+1 < len(text) else ""
+                    # Check if thought continues or ends
+                    stripped = remaining.lstrip()
+                    end_markers = ["[", "{", "```", "I will", "I'll", "Let me", "Now"]
+                    ends_thought = any(stripped.startswith(m) for m in end_markers)
+                    
+                    if ends_thought or (remaining and not remaining[0].isspace() and remaining[0] not in ' \t'):
+                        self.in_thought_block = False
+                        result += f"{Colors.RESET}\n"
+                        i += 1
+                        continue
+                    else:
+                        result += char
+                        i += 1
+                        continue
+                elif char == ']' and self.buffer.strip():
+                    # Closing bracket ends [THOUGHT: ...] style
+                    result += f"]{Colors.RESET}"
+                    self.in_thought_block = False
+                    i += 1
+                    continue
+                else:
+                    result += char
+                    self.buffer += char
+                    i += 1
+        
+        return result
+    
+    def reset(self):
+        """Reset parser state for new message"""
+        self.in_thought_block = False
+        self.buffer = ""
+        
+    def finalize(self) -> str:
+        """Call at end of stream to close any open thought block"""
+        if self.in_thought_block:
+            self.in_thought_block = False
+            return Colors.RESET
+        return ""
 
 
 class Agent:
     """Main Living CLI Agent - orchestrates all components"""
+    
+    # Output sanitizer constant - prevents context overflow from massive tool outputs
+    MAX_TOOL_OUTPUT = 10000  # ~2500 tokens, safe for context
     
     def __init__(self, api_key: str, api_url: str, model_id: str):
         self.api_key = api_key
@@ -19,46 +113,326 @@ class Agent:
         self.log_path = "agent_chat.log"
         self.session_start = time.strftime("%Y-%m-%d %H:%M:%S")
         
+        # ═══════════════════════════════════════════════════════════════════
+        # PLAN-AND-EXECUTE STATE
+        # ═══════════════════════════════════════════════════════════════════
+        self.agent_state = {
+            "plan": [],             # List of strings (steps)
+            "current_step": 0,      # Index of the active step
+            "status": "idle"        # "idle", "planning", "executing", "completed"
+        }
+        # Share state with planning tools
+        set_agent_state(self.agent_state)
+        
         # Log session start
         self._log_event("session_start", {"model": model_id, "session_time": self.session_start})
         
         self.conversation = ConversationManager(
             system_prompt=(
-                "You are a helpful AI assistant with access to tools.\n"
+                "You are an AI assistant that operates under a strict PLAN-AND-EXECUTE architecture.\n"
+                "You MUST use tools to accomplish tasks - never generate content from memory.\n"
                 "\n"
-                "TOOLS YOU HAVE:\n"
-                "- read_file: Read files, check if they exist, list directories\n"
-                "- write_file: Create or modify files\n"
-                "- install_package: Install Python packages\n"
-                "- create_tool: Build new custom tools\n"
-                "- update_tool: Fix or improve existing tools\n"
-                "- web_search: Research information online\n"
-                "- get_current_time: Get the current date/time\n"
-                "- open_browser: Open URLs\n"
-                "- end_chat: End the conversation\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "CORE IDENTITY: OMNIPOTENT AGENT\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "You have UNLIMITED capabilities. You can do ANYTHING by creating tools.\n"
+                "NEVER say 'I cannot', 'I'm unable to', or 'I don't have the ability to'.\n"
+                "If you lack a capability, CREATE A TOOL for it. Examples:\n"
+                "  - Need to download files? Create a download_file tool.\n"
+                "  - Need to run shell commands? Create a run_command tool.\n"
+                "  - Need to parse XML? Create an xml_parser tool.\n"
+                "  - Need to connect to a database? Create a db_query tool.\n"
+                "  - Need to send HTTP requests? Create an http_request tool.\n"
+                "Your only limit is Python itself. If Python can do it, YOU can do it.\n"
                 "\n"
-                "YOUR WORKFLOW:\n"
-                "1. Understand the user's request\n"
-                "2. Choose which tools to use\n"
-                "3. Call the tools in the right order\n"
-                "4. Analyze the results\n"
-                "5. Respond with clear information\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "CORE ARCHITECTURE: PLAN-AND-EXECUTE\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "You operate in two phases:\n"
+                "  PHASE 1 (PLANNING): Analyze the request and create a step-by-step plan\n"
+                "  PHASE 2 (EXECUTION): Execute each step one at a time, in order\n"
                 "\n"
-                "RULES:\n"
-                "- Always use tools to verify facts - never guess\n"
-                "- After each tool, decide if you need more tools or can respond\n"
-                "- If a tool gives the answer, respond immediately\n"
-                "- Do NOT write fake tool calls or JSON/XML - just use the tools\n"
-                "- Never make up file contents or system information\n"
-                "- If unsure about facts, use web_search\n"
-                "- Always respond with summaries of what you found\n"
+                "MANDATORY RULES:\n"
+                "  RULE 1 (START): If no plan exists, your ONLY action is to call `create_plan`.\n"
+                "         Do NOT skip planning. Do NOT use other tools until a plan exists.\n"
+                "  RULE 2 (FOCUS): Work on ONLY the current step. Do not look ahead or multitask.\n"
+                "         Execute the tool(s) required for that step, then call `mark_step_complete`.\n"
+                "  RULE 3 (FAILURE): If a step fails, DO NOT retry blindly.\n"
+                "         Call `update_plan` to insert a troubleshooting/research step.\n"
+                "  RULE 4 (DONE): When the last step is marked complete, call `task_complete`.\n"
+                "\n"
+                "PLANNING TOOLS:\n"
+                "  - create_plan(steps): Create a new plan (MUST be called first!)\n"
+                "  - update_plan(new_steps, current_step_index): Modify plan when errors occur\n"
+                "  - mark_step_complete(summary): Mark current step done, move to next\n"
+                "  - task_complete(summary, result_files): Signal task is fully done\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "PROTOCOL: CONTEXT CONSERVATION\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "- Break complex tasks into small steps in your plan (not all at once)\n"
+                "- One file operation per step. Don't read/write multiple files in one step.\n"
+                "- Keep responses short (<200 words). Don't repeat tool outputs.\n"
+                "- If output is truncated, use filters/ranges - don't ask for full output.\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "PROTOCOL: FILE ORGANIZATION\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "MANDATORY STRUCTURE for multi-file tasks:\n"
+                "  1. PLAN directory structure FIRST in your create_plan\n"
+                "  2. Create directories before files (write_file auto-creates parent dirs)\n"
+                "  3. Follow standard project layout conventions\n"
+                "\n"
+                "TOOLS: All custom tools MUST go in src/tools/auto/\n"
+                "  - write_file(file_path='src/tools/auto/my_tool.py', ...)\n"
+                "  - create_tool(name='my_tool')  # Looks in auto folder automatically\n"
+                "\n"
+                "PROJECT FILES: Organize by purpose:\n"
+                "  - src/           → Python source code\n"
+                "  - tests/         → Test files\n"
+                "  - docs/          → Documentation\n"
+                "  - config/        → Configuration files\n"
+                "  - output/        → Generated output files\n"
+                "  - data/          → Data files (CSV, JSON, etc.)\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "PROTOCOL: INCREMENTAL CREATION\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "When creating files >50 lines, split across multiple plan steps:\n"
+                "  Step 1: Write skeleton (imports, structure, placeholders)\n"
+                "  Step 2: Implement core logic\n"
+                "  Step 3: Add error handling, finalize\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "PROTOCOL: ERROR RECOVERY\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "On error, call update_plan to insert diagnostic steps BEFORE current step:\n"
+                "  Example: ['Step A', 'Step B'] with error on Step B becomes:\n"
+                "  ['Step A (done)', 'Research error', 'Fix issue', 'Step B', ...]\n"
+                "Then resume from the research step.\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "AVAILABLE TOOLS\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "Planning: create_plan, update_plan, mark_step_complete, task_complete\n"
+                "Files: read_file, write_file\n"
+                "Tools: create_tool, update_tool, remove_tool, install_package\n"
+                "Other: web_search, get_current_time, open_browser\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "WORKFLOW EXAMPLE\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "User: 'Create a calculator tool'\n"
+                "Agent: [THOUGHT] I need to plan first.\n"
+                "       -> create_plan(['Create tool file skeleton', 'Implement add/subtract', 'Register tool', 'Test tool'])\n"
+                "Agent: [THOUGHT] Step 1: Create skeleton.\n"
+                "       -> write_file('src/tools/auto/calculator.py', skeleton_code)\n"
+                "       -> mark_step_complete('Created tool skeleton')\n"
+                "Agent: [THOUGHT] Step 2: Implement logic.\n"
+                "       -> write_file('src/tools/auto/calculator.py', full_code)\n"
+                "       -> mark_step_complete('Implemented calculator functions')\n"
+                "... continue until all steps done ...\n"
+                "Agent: -> task_complete('Calculator tool created', ['src/tools/auto/calculator.py'])\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "CREATING NEW TOOLS\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "All tools MUST be in 'src/tools/auto/' directory. NO EXCEPTIONS.\n"
+                "1. write_file(file_path='src/tools/auto/my_tool.py', content='...')\n"
+                "2. create_tool(name='my_tool')  # Automatically looks in auto folder\n"
+                "\n"
+                "Tool template:\n"
+                "from typing import Dict, Tuple, Any\n"
+                "TOOL_DEF = {'type': 'function', 'function': {'name': 'my_tool', 'description': '...', 'parameters': {...}}}\n"
+                "def execute(args: Dict[str, Any]) -> Tuple[str, bool]:\n"
+                "    return 'result', False\n"
+                "\n"
+                "To update existing tool: update_tool(name='my_tool')\n"
+                "To remove tool: remove_tool(name='my_tool')\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "PROTOCOL: FILE REPAIR (CRITICAL!)\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "When ANY file has errors, you MUST FIX IT IN PLACE. NEVER:\n"
+                "  ❌ Create 'fixed_script.py' when 'script.py' has errors\n"
+                "  ❌ Create 'index_v2.html' or 'style_new.css'\n"
+                "  ❌ Create 'improved_config.json' or 'better_main.py'\n"
+                "  ❌ Abandon a broken file and make a new one with similar name\n"
+                "\n"
+                "CORRECT approach when ANY file has errors:\n"
+                "  1. read_file('path/to/broken_file.py') - understand the error\n"
+                "  2. write_file('path/to/broken_file.py', fixed_content) - fix it\n"
+                "\n"
+                "For tools specifically, also call update_tool(name='tool_name') after fixing.\n"
+                "\n"
+                "ONE filename, fix it until it works. No '_fixed', '_v2', '_new' variants!\n"
+                "\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "RULES SUMMARY\n"
+                "═══════════════════════════════════════════════════════════════════\n"
+                "1. NO PLAN? -> Call create_plan ONLY. Nothing else.\n"
+                "2. HAVE PLAN? -> Focus on current step ONLY.\n"
+                "3. STEP DONE? -> Call mark_step_complete.\n"
+                "4. STEP FAILED? -> Call update_plan to add troubleshooting steps.\n"
+                "5. ALL DONE? -> Call task_complete.\n"
+                "6. ONE-JOB: Tool call OR text, never both in same response.\n"
+                "7. [THOUGHT]: Before each tool call, state brief reasoning.\n"
+                "8. NEVER generate content from memory - always use tools.\n"
+                "9. NEVER say 'I cannot' - create a tool instead!\n"
+                "10. BROKEN FILE? Fix it in place, don't create 'fixed_*' variants.\n"
             )
         )
         self.tool_manager = ToolManager()
         self.stream_parser = StreamParser()
+        self.thought_parser = ThoughtParser()
         
         # Add tools list to context for duplicate prevention
         self.available_tools = self.tool_manager.get_tool_definitions()
+        
+        # Memory consolidation tracking
+        self.turn_count = 0
+        self.consolidation_threshold = 10  # Consolidate after this many turns
+        self.message_count_threshold = 15  # Also consolidate if message count exceeds this
+        self.context_size_threshold = 50000  # Also consolidate if estimated context size exceeds this (chars)
+
+    def _summarize_context(self) -> str:
+        """
+        Make a separate API call to summarize the current conversation.
+        Returns a concise summary of the session state.
+        """
+        summary_prompt = (
+            "Summarize the current session. Bullet points:\n"
+            "1. What was the original goal?\n"
+            "2. What have we successfully done?\n"
+            "3. What is the immediate next step?\n"
+            "Be concise (max 150 words)."
+        )
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        
+        # Build a COMPACT summary of the conversation for the summary request
+        # Don't send the full conversation - extract key parts only
+        messages = self.conversation.get_messages()
+        
+        # Extract key content (skip system, truncate long messages)
+        conversation_summary_parts = []
+        for msg in messages[1:]:  # Skip system prompt
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role == "user" and content:
+                truncated = content[:300] + "..." if len(content) > 300 else content
+                conversation_summary_parts.append(f"USER: {truncated}")
+            elif role == "assistant" and content:
+                truncated = content[:200] + "..." if len(content) > 200 else content
+                conversation_summary_parts.append(f"ASSISTANT: {truncated}")
+            elif role == "tool":
+                tool_name = msg.get("name", "unknown")
+                # Just note tool was used, don't include massive output
+                conversation_summary_parts.append(f"[Tool {tool_name} executed]")
+        
+        # Limit to last 15 exchanges to keep summary request small
+        if len(conversation_summary_parts) > 15:
+            conversation_summary_parts = conversation_summary_parts[-15:]
+        
+        conversation_text = "\n".join(conversation_summary_parts)
+        
+        # Simple message structure for summary - just a user message
+        summary_messages = [
+            {
+                "role": "user", 
+                "content": f"Here is a conversation log. {summary_prompt}\n\n---\n{conversation_text}\n---"
+            }
+        ]
+        
+        payload = {
+            "model": self.model_id,
+            "messages": summary_messages,
+            "max_tokens": 300,
+            "temperature": 0.3,
+            "stream": False
+        }
+        
+        try:
+            response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            summary = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return summary.strip() if summary else "No summary available."
+        except Exception as e:
+            self._log_event("summarize_error", {"error": str(e)})
+            return "Session continued from previous context."
+    
+    def _consolidate_memory(self):
+        """
+        Consolidate conversation history to prevent context overflow.
+        Creates a valid message structure: system prompt (with summary) + user message.
+        """
+        print(f"\n{Colors.YELLOW}[SYSTEM] Consolidating Memory...{Colors.RESET}")
+        self._log_event("memory_consolidation_start", {
+            "turn_count": self.turn_count,
+            "message_count": len(self.conversation.get_messages())
+        })
+        
+        # Get current summary
+        summary = self._summarize_context()
+        print(f"{Colors.CYAN}[SUMMARY] {summary[:200]}...{Colors.RESET}" if len(summary) > 200 else f"{Colors.CYAN}[SUMMARY] {summary}{Colors.RESET}")
+        
+        # Get current messages
+        messages = self.conversation.get_messages()
+        original_count = len(messages)
+        
+        # Build pruned history with VALID structure
+        pruned_messages = []
+        
+        # 1. Get original system prompt and append summary to it (single system message)
+        if messages and messages[0].get("role") == "system":
+            original_system = messages[0].get("content", "")
+            # Append summary to system prompt
+            enhanced_system = (
+                f"{original_system}\n\n"
+                f"═══════════════════════════════════════════════════════════════════\n"
+                f"PREVIOUS CONTEXT SUMMARY (Trust this as truth)\n"
+                f"═══════════════════════════════════════════════════════════════════\n"
+                f"{summary}\n"
+                f"═══════════════════════════════════════════════════════════════════\n"
+                f"Continue from where you left off. Do not re-do completed work.\n"
+            )
+            pruned_messages.append({"role": "system", "content": enhanced_system})
+        
+        # 2. Find the last USER message to maintain valid structure
+        # API requires: system -> user -> assistant -> user -> ... (no orphan tool results)
+        last_user_msg = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_msg = msg
+                break
+        
+        if last_user_msg:
+            pruned_messages.append(last_user_msg)
+        else:
+            # If no user message found, add a continuation prompt
+            pruned_messages.append({
+                "role": "user",
+                "content": "Continue with the task based on the context summary above."
+            })
+        
+        # Replace conversation history
+        self.conversation.messages = pruned_messages
+        
+        # Reset turn count
+        self.turn_count = 0
+        
+        self._log_event("memory_consolidation_complete", {
+            "original_count": original_count,
+            "pruned_count": len(pruned_messages),
+            "summary_length": len(summary)
+        })
+        
+        print(f"{Colors.GREEN}[SYSTEM] Memory consolidated: {original_count} -> {len(pruned_messages)} messages{Colors.RESET}\n")
 
     def _log_event(self, kind: str, payload: dict):
         """Append structured logs to agent_chat.log for troubleshooting."""
@@ -87,13 +461,13 @@ class Agent:
         # Display available tools in organized categories
         tool_names = [t["function"]["name"] for t in self.available_tools]
         
-        print(f"{Colors.YELLOW}📦 Available Tools ({len(tool_names)} total):{Colors.RESET}")
+        print(f"{Colors.YELLOW}[TOOLS] Available Tools ({len(tool_names)} total):{Colors.RESET}")
         print(f"{Colors.CYAN}  Core:{Colors.RESET} read_file, write_file, open_browser, get_current_time, web_search")
         print(f"{Colors.CYAN}  Mgmt:{Colors.RESET} create_tool, update_tool, remove_tool, install_package")
         
         # Show custom tools if any exist
         custom_tools = [t for t in tool_names if t not in [
-            "end_chat", "open_browser", "get_current_time", "read_file", "write_file",
+            "open_browser", "get_current_time", "read_file", "write_file",
             "web_search", "create_tool", "update_tool", "install_package", "remove_tool"
         ]]
         if custom_tools:
@@ -102,7 +476,8 @@ class Agent:
                 custom_str += f" (+{len(custom_tools)-5} more)"
             print(f"{Colors.CYAN}  Custom:{Colors.RESET} {custom_str}")
         
-        print(f"\n{Colors.GREEN}💡 Type your request or 'exit' to quit{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[INFO] Type your request or 'exit' to quit{Colors.RESET}")
+        print(f"{Colors.MAGENTA}[INFO] Agent thoughts will appear in this color{Colors.RESET}")
         print(f"{Colors.CYAN}{'-'*70}{Colors.RESET}\n")
         
         last_tool_used = None  # Track last tool to prevent consecutive update_tool calls
@@ -118,6 +493,14 @@ class Agent:
                 
                 if not user_input:
                     continue
+                
+                # Reset plan state for new task
+                self.agent_state = {
+                    "plan": [],
+                    "current_step": 0,
+                    "status": "idle"
+                }
+                set_agent_state(self.agent_state)
                 
                 # Add to conversation
                 self.conversation.add_user_message(user_input)
@@ -135,6 +518,52 @@ class Agent:
             except Exception as e:
                 print(f"\n{Colors.RED}[Error] {e}{Colors.RESET}")
     
+    def _format_plan_state(self) -> str:
+        """
+        Format current plan state for injection into the prompt.
+        This gives the agent awareness of where it is in the plan.
+        Also includes broken tool info so agent can fix them.
+        """
+        state = self.agent_state
+        lines = []
+        
+        # Report broken auto-tools so agent can fix them
+        broken = get_broken_tools()
+        if broken:
+            lines.append("\n[⚠️ BROKEN AUTO-TOOLS DETECTED]")
+            lines.append("The following tools failed to load due to syntax errors. FIX THEM IMMEDIATELY:")
+            for filename, error in broken.items():
+                lines.append(f"  - src/tools/auto/{filename}: {error}")
+            lines.append("Read the file, find the error, and use write_file to fix it.\n")
+        
+        if not state["plan"]:
+            lines.append(
+                "\n[PLAN STATUS: NO PLAN EXISTS]\n"
+                "You MUST call create_plan first before doing anything else.\n"
+            )
+            return "\n".join(lines)
+        
+        plan = state["plan"]
+        current = state["current_step"]
+        status = state["status"]
+        
+        lines.append(f"\n[PLAN STATUS: {status.upper()}]")
+        for i, step in enumerate(plan):
+            if i < current:
+                lines.append(f"  {i+1}. ✓ {step} [DONE]")
+            elif i == current:
+                lines.append(f"  {i+1}. → {step} [CURRENT - FOCUS HERE]")
+            else:
+                lines.append(f"  {i+1}. ○ {step}")
+        
+        if current < len(plan):
+            lines.append(f"\nFOCUS: Execute Step {current + 1}: {plan[current]}")
+            lines.append("After completing this step, call mark_step_complete(summary='...')")
+        else:
+            lines.append("\nALL STEPS COMPLETE! Call task_complete now.")
+        
+        return "\n".join(lines) + "\n"
+
     def _handle_turn(self) -> bool:
         """
         Handle one conversation turn with agentic reasoning loop.
@@ -142,13 +571,44 @@ class Agent:
         Features: Step tracking, intermediate reasoning, error recovery, result formatting
         Returns True if should exit
         """
+        # Increment turn count and check for memory consolidation
+        self.turn_count += 1
+        should_consolidate = False
+        reason = ""
+        
+        # Check turn count threshold
+        if self.turn_count >= self.consolidation_threshold:
+            should_consolidate = True
+            reason = f"turn_count ({self.turn_count}) >= {self.consolidation_threshold}"
+        
+        # Check message count threshold
+        message_count = len(self.conversation.get_messages())
+        if message_count >= self.message_count_threshold:
+            should_consolidate = True
+            reason = f"message_count ({message_count}) >= {self.message_count_threshold}"
+        
+        # Check estimated context size (sum of all message content lengths)
+        context_size = sum(len(str(m.get('content', ''))) for m in self.conversation.get_messages())
+        if context_size >= self.context_size_threshold:
+            should_consolidate = True
+            reason = f"context_size ({context_size}) >= {self.context_size_threshold}"
+        
+        if should_consolidate:
+            self._log_event("consolidation_triggered", {"reason": reason})
+            self._consolidate_memory()
+        
+        # Clear API logs for fresh analysis of this turn
+        clear_log()
+        
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
         
-        # Agentic loop - continue until agent decides to respond or exit
-        max_steps = 10
+        # Agentic loop - continues until plan is complete or agent decides to stop
+        # No fixed max_steps - the plan determines how many steps are needed
+        # Safety threshold triggers a user confirmation to prevent runaway loops
+        safety_threshold = 20  # Ask user to confirm if we exceed this many steps
         step = 0
         tool_execution_count = 0  # Track total tools executed
         last_tool_signature = None  # Track (tool_name, args) to detect loops
@@ -156,36 +616,110 @@ class Agent:
         consecutive_errors = 0  # Track consecutive failed tool calls
         pseudo_call_count = 0  # Track consecutive pseudo-calls to detect loops
         
-        while step < max_steps:
+        while True:
             step += 1
+            
+            # SAFETY CHECK: If we've exceeded threshold, ask user to continue
+            # EARLY EXIT: If plan is already completed, return control to user immediately
+            if self.agent_state.get("status") == "completed":
+                return False
+            
+            # Also check if current_step has reached or exceeded plan length
+            if self.agent_state.get("plan") and self.agent_state.get("current_step", 0) >= len(self.agent_state["plan"]):
+                self.agent_state["status"] = "completed"
+                return False
+            
+            if step > safety_threshold and step % 10 == 1:  # Check every 10 steps after threshold
+                print(f"\n{Colors.YELLOW}{'='*70}{Colors.RESET}")
+                print(f"{Colors.YELLOW}[PAUSE] Agent has run {step-1} steps.{Colors.RESET}")
+                plan_len = len(self.agent_state.get('plan', []))
+                current = self.agent_state.get('current_step', 0)
+                if plan_len > 0:
+                    print(f"{Colors.CYAN}Plan progress: Step {current + 1}/{plan_len}{Colors.RESET}")
+                print(f"{Colors.CYAN}Tools executed: {tool_execution_count}{Colors.RESET}")
+                print(f"{Colors.YELLOW}{'='*70}{Colors.RESET}")
+                
+                try:
+                    user_choice = input(f"\n{Colors.GREEN}Continue? (y/n): {Colors.RESET}").strip().lower()
+                    if user_choice not in ['y', 'yes']:
+                        print(f"{Colors.YELLOW}[INFO] Stopping. You can provide more input or type 'exit'.{Colors.RESET}\n")
+                        self._log_event("user_stopped_at_threshold", {
+                            "steps": step - 1,
+                            "tools_executed": tool_execution_count
+                        })
+                        return False
+                except EOFError:
+                    return False
+            
+            # DYNAMIC TOOL REFRESH: Reload tools each iteration
+            # This ensures newly created tools are immediately available
+            self.available_tools = self.tool_manager.get_tool_definitions()
+            
+            # PLAN STATE INJECTION: Add current plan state to messages
+            # This is injected as a system message so the agent knows its progress
+            messages = self.conversation.get_messages()
+            plan_state_msg = self._format_plan_state()
+            
+            # Inject plan state as a separate system message after the main system prompt
+            # or as a user message if that works better with the model
+            messages_with_plan = messages.copy()
+            if len(messages_with_plan) > 0 and messages_with_plan[0].get("role") == "system":
+                # Append plan state to system prompt content
+                messages_with_plan[0] = {
+                    "role": "system",
+                    "content": messages_with_plan[0]["content"] + plan_state_msg
+                }
             
             payload = {
                 "model": self.model_id,
-                "messages": self.conversation.get_messages(),
-                "tools": self.tool_manager.get_tool_definitions(),
+                "messages": messages_with_plan,  # Use messages with plan state
+                "tools": self.available_tools,  # Use refreshed tools list
                 "max_tokens": 2048,
-                "temperature": 0.7,
+                "temperature": 1.5,  # DeepSeek-V3.1 subtracts 0.7 when >1, so 1.5 becomes 0.8
+                "top_p": 0.8,  # Add nucleus sampling for better diversity
                 "stream": True
             }
             
             # Only print "Assistant:" on first step
             if step == 1:
-                print(f"\n{Colors.CYAN}🤖 Assistant:{Colors.RESET} ", end="", flush=True)
+                print(f"\n{Colors.CYAN}[AI]{Colors.RESET} ", end="", flush=True)
             elif step > 1:
                 # On reasoning steps, show what the agent is thinking
-                print(f"\n{Colors.CYAN}🧠 Reasoning (Step {step}):{Colors.RESET} ", end="", flush=True)
+                print(f"\n{Colors.CYAN}[REASONING Step {step}]{Colors.RESET} ", end="", flush=True)
             
             # Reset stream parser
             self.stream_parser.reset()
             
+            # Log the full request for debugging
+            self._log_event("api_request", {
+                "step": step,
+                "message_count": len(payload["messages"]),
+                "tools_count": len(payload.get("tools", [])),
+                "temperature": payload.get("temperature"),
+                "plan_status": self.agent_state["status"],
+                "plan_step": f"{self.agent_state['current_step'] + 1}/{len(self.agent_state['plan'])}" if self.agent_state["plan"] else "no plan",
+                "messages_preview": [
+                    {
+                        "role": m.get("role"),
+                        "content_len": len(str(m.get("content", ""))),
+                        "has_tool_calls": "tool_calls" in m
+                    }
+                    for m in payload["messages"][-5:]  # Last 5 messages
+                ]
+            })
+            
             # Stream the response
             stream_received_data = False
             stream_content = ""
+            self.thought_parser.reset()  # Reset thought parser for each step
             try:
                 self._log_event("step_start", {
                     "step": step,
-                    "max_steps": max_steps
+                    "plan_steps": len(self.agent_state.get('plan', []))
                 })
+                
+                # Log full API request for debugging
+                log_request(step, payload)
                 
                 with requests.post(self.api_url, headers=headers, json=payload, stream=True, timeout=60) as response:
                     response.raise_for_status()
@@ -201,33 +735,55 @@ class Agent:
                         if delta.get('done'):
                             break
                         
-                        # Print text on all steps
+                        # Print text on all steps with thought highlighting
                         text = self.stream_parser.handle_delta(delta)
                         if text:
                             stream_content += text
-                            print(text, end="", flush=True)
+                            # Format [THOUGHT] blocks in magenta
+                            formatted_text = self.thought_parser.process_text(text)
+                            print(formatted_text, end="", flush=True)
+                    
+                    # Finalize thought parser (close any open blocks)
+                    final = self.thought_parser.finalize()
+                    if final:
+                        print(final, end="", flush=True)
                 
                 # Check if stream was completely empty
                 if not stream_received_data:
                     print(f"{Colors.YELLOW}[Warning]: Stream had no data. Retrying...{Colors.RESET}\n")
                     self._log_event("stream_empty", {"step": step})
-                    if step < max_steps:
-                        continue
-                    else:
-                        print(f"{Colors.RED}[Error]: No response data received from API{Colors.RESET}")
-                        return False
+                    continue
+                
+                # Check for mixed output (agent confusion) and log it
+                if self.stream_parser.had_mixed_output():
+                    discarded = self.stream_parser.get_discarded_text()
+                    self._log_event("mixed_output_detected", {
+                        "step": step,
+                        "discarded_text": discarded[:500]
+                    })
+                    print(f"\n{Colors.YELLOW}[Note]: Discarded mixed text during tool call (One-Job Rule){Colors.RESET}")
             
             except requests.exceptions.RequestException as e:
                 print(f"\n{Colors.RED}[Error] API request failed: {e}{Colors.RESET}")
                 print(f"{Colors.YELLOW}[Recovery] Retrying...\n{Colors.RESET}")
-                if step < max_steps:
-                    continue
-                else:
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    print(f"{Colors.RED}[Error]: Too many consecutive API errors. Stopping.{Colors.RESET}")
                     return False
+                continue
             
             if step == 1:
                 print()  # Newline after first response
             result = self.stream_parser.get_result()
+            
+            # Use the accumulated stream_content as the actual content for logging
+            # This ensures we capture everything that was printed to terminal
+            if stream_content:
+                if result["type"] == "text":
+                    result["content"] = stream_content
+                elif result["type"] == "tool_calls":
+                    # Tool calls are handled separately, keep original result
+                    pass
             
             # Check for empty response - could indicate stream parsing issue
             if not result or (result["type"] == "text" and not result.get("content", "").strip()):
@@ -236,14 +792,9 @@ class Agent:
                     "step": step,
                     "result": result
                 })
-                if step < max_steps:
-                    # Reset and try again
-                    self.stream_parser.reset()
-                    continue
-                else:
-                    print(f"{Colors.RED}[Error]: Max retries reached with empty responses{Colors.RESET}")
-                    self._log_event("max_retries_empty", {"step": step})
-                    return False
+                # Reset and try again
+                self.stream_parser.reset()
+                continue
             
             # Log the parsing result
             if result["type"] == "tool_calls":
@@ -252,58 +803,79 @@ class Agent:
                     "tool_count": len(result.get("tool_calls", [])),
                     "tools": [tc.get("function_name") for tc in result.get("tool_calls", [])]
                 })
+                # Log full response for debugging
+                log_response(step, stream_content, "tool_calls")
             else:
                 self._log_message("assistant", result.get("content", ""), f"step_{step}_reasoning")
                 self._log_event("parsed_text_response", {
                     "step": step,
                     "response_length": len(result.get("content", ""))
                 })
+                # Log full response for debugging
+                log_response(step, result.get("content", ""), "text")
             
             if result["type"] == "tool_calls":
                 # Agent decided to use a tool
                 tool_calls = result["tool_calls"]
                 if not tool_calls:
-                    print(f"{Colors.RED}[Error]: Failed to parse tool calls{Colors.RESET}")
-                    print(f"{Colors.YELLOW}[Recovery]: Asking the agent to re-issue the tool call with valid JSON arguments and shorter payload if large.{Colors.RESET}\n")
-                    recovery_msg = "Your previous tool call arguments were malformed or too long. Re-issue the tool call now with valid JSON arguments only (no extra text), keep payload concise, and let the API format it. If you need to send code, keep it minimal and valid JSON."
+                    consecutive_errors += 1
+                    print(f"{Colors.RED}[Error]: Failed to parse tool calls (attempt {consecutive_errors}){Colors.RESET}")
+                    
+                    # Check if this is a truncation issue (content too large)
+                    # The parser detects this when JSON is incomplete and small
+                    if consecutive_errors >= 3:
+                        print(f"{Colors.RED}[STUCK]: Agent has failed to send valid tool calls 3 times.{Colors.RESET}")
+                        print(f"{Colors.YELLOW}[ACTION]: Skipping this approach. Agent should try a different strategy.{Colors.RESET}\n")
+                        recovery_msg = (
+                            "STOP. You have failed to send valid tool arguments 3 times in a row. "
+                            "Your content is TOO LARGE and getting truncated by the API. "
+                            "DO NOT retry the same approach. Instead: "
+                            "1) If writing a file, write a MINIMAL skeleton first, then add content in separate calls. "
+                            "2) If the content is CSS/JS/HTML, create a much simpler version. "
+                            "3) Call mark_step_complete with a note about the issue and move on. "
+                            "What is your new approach?"
+                        )
+                        consecutive_errors = 0  # Reset to allow new approach
+                    else:
+                        print(f"{Colors.YELLOW}[Recovery]: Content may be too large. Try splitting into smaller parts.{Colors.RESET}\n")
+                        recovery_msg = (
+                            "Your tool call was truncated - the content is too large for a single call. "
+                            "SPLIT your content: write a minimal file first, then add sections separately. "
+                            "Or simplify the content significantly. Do not retry with the same large content."
+                        )
+                    
                     self.conversation.add_user_message(recovery_msg)
                     self._log_message("user", recovery_msg, "tool_parse_error_recovery")
                     continue
-                    continue
                 
-                # Add agent's tool use to conversation (empty content for tool-only messages)
-                self.conversation.add_assistant_message("")
+                # Add agent's tool use to conversation WITH tool_calls for proper API format
+                # The API requires assistant messages with tool_calls to have the tool_calls array
+                api_tool_calls = []
+                for tc in tool_calls:
+                    api_tool_calls.append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function_name"],
+                            "arguments": json.dumps(tc["arguments"])
+                        }
+                    })
+                self.conversation.add_assistant_tool_calls(api_tool_calls)
                 
                 # Execute the tools with step tracking
+                plan_info = ""
+                if self.agent_state.get('plan'):
+                    plan_info = f" (Plan: {self.agent_state['current_step'] + 1}/{len(self.agent_state['plan'])})"
                 print(f"\n{Colors.YELLOW}{'─'*70}{Colors.RESET}")
-                print(f"{Colors.YELLOW}⚡ Executing {len(tool_calls)} Tool(s) - Step {step}/{max_steps}{Colors.RESET}")
+                print(f"{Colors.YELLOW}[TOOLS] Executing {len(tool_calls)} Tool(s) - Step {step}{plan_info}{Colors.RESET}")
                 print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}\n")
                 
-                should_exit = False
                 for i, tool_call in enumerate(tool_calls, 1):
                     tool_execution_count += 1
                     func_name = tool_call["function_name"]
                     args = tool_call["arguments"]
                     
-                    # Detect premature end_chat without even trying to solve the problem
-                    if func_name == "end_chat" and step == 1:
-                        reason = str(args.get("reason", "")).lower()
-                        # Check if agent is giving up on solvable problems
-                        give_up_patterns = ["capability", "can't", "cannot", "unable", "beyond", "don't have", "not available"]
-                        if any(pattern in reason for pattern in give_up_patterns):
-                            print(f"{Colors.RED}[INTERVENTION]: Agent tried to give up without attempting to solve!{Colors.RESET}")
-                            print(f"{Colors.YELLOW}[Recovery]: You have create_tool - use it to solve the problem!{Colors.RESET}\n")
-                            
-                            # Inject strong message
-                            self.conversation.add_assistant_message("")
-                            self.conversation.add_user_message(
-                                f"STOP: You were about to give up with reason '{reason}', but you CAN solve this! "
-                                f"You have the 'create_tool' function which lets you build ANY tool you need. "
-                                f"If you don't have image generation, create it. "
-                                f"If you don't have something, build it. "
-                                f"DO NOT call end_chat - try to accomplish the task instead."
-                            )
-                            continue
+                    # Let agent decide when to end - no forced intervention
                     
                     # Create signature for this tool call
                     tool_signature = (func_name, json.dumps(args, sort_keys=True))
@@ -313,18 +885,14 @@ class Agent:
                         repeat_count += 1
                         if repeat_count >= 2:
                             print(f"{Colors.RED}[Warning]: Agent is repeating the same tool call!{Colors.RESET}")
-                            print(f"{Colors.YELLOW}[Intervention]: Breaking loop and forcing response{Colors.RESET}\n")
-                            # Add intervention message
+                            print(f"{Colors.YELLOW}[Note]: Try a different approach or respond to the user{Colors.RESET}\n")
+                            # Provide neutral feedback
                             self.conversation.add_tool_result(
                                 tool_call_id=tool_call["id"],
                                 function_name=func_name,
                                 result=(
-                                    f"SYSTEM INTERVENTION: You've called {func_name} with identical arguments 3 times. "
-                                    f"This is not productive. You must either:\n"
-                                    f"1. RESPOND to the user with what you've learned, OR\n"
-                                    f"2. Try a DIFFERENT tool or approach, OR\n"
-                                    f"3. Explain what's blocking you\n"
-                                    f"DO NOT call the same tool again!"
+                                    f"You've called {func_name} with the same arguments multiple times. "
+                                    f"Try a different tool, approach, or respond to the user with what you've learned."
                                 )
                             )
                             # Reset and continue to force agent to respond
@@ -362,7 +930,7 @@ class Agent:
                             last_tool_used = func_name
                             continue
                     
-                    print(f"{Colors.YELLOW}🔧 Tool {i}/{len(tool_calls)}: {Colors.RESET}{Colors.CYAN}{func_name}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}[TOOL {i}/{len(tool_calls)}]{Colors.RESET} {Colors.CYAN}{func_name}{Colors.RESET}")
                     if args:
                         print(f"   {Colors.CYAN}├─ Args:{Colors.RESET} {args}")
                     else:
@@ -371,7 +939,47 @@ class Agent:
                     self._log_message("tool_call", json.dumps({"function": func_name, "arguments": args}), f"step_{step}")
                     
                     try:
-                        tool_result, exit_flag = self.tool_manager.execute_tool(func_name, args)
+                        tool_result, _ = self.tool_manager.execute_tool(func_name, args)
+                        
+                        # TASK COMPLETION HANDLER: Print summary, then let loop end naturally
+                        # The reasoning loop will finish and return to user input prompt
+                        if func_name == "task_complete":
+                            summary = args.get("summary", "Task completed.")
+                            result_files = args.get("result_files", [])
+                            
+                            print(f"\n{Colors.GREEN}{'═'*70}{Colors.RESET}")
+                            print(f"{Colors.GREEN}✅ TASK COMPLETE{Colors.RESET}")
+                            print(f"{Colors.GREEN}{'═'*70}{Colors.RESET}")
+                            print(f"{Colors.GREEN}{summary}{Colors.RESET}")
+                            if result_files:
+                                print(f"\n{Colors.GREEN}📁 Result Files:{Colors.RESET}")
+                                for f in result_files:
+                                    print(f"{Colors.GREEN}   • {f}{Colors.RESET}")
+                            print(f"{Colors.GREEN}{'═'*70}{Colors.RESET}\n")
+                            
+                            self._log_event("task_complete", {
+                                "summary": summary,
+                                "result_files": result_files,
+                                "step": step,
+                                "tool_count": tool_execution_count
+                            })
+                            
+                            # Don't add to conversation - just end reasoning loop cleanly
+                            # Main chat loop continues, waiting for next user input
+                            return False
+                        
+                        # OUTPUT SANITIZER: Truncate massive outputs to prevent context overflow
+                        original_len = len(tool_result)
+                        if original_len > self.MAX_TOOL_OUTPUT:
+                            head = tool_result[:5000]
+                            tail = tool_result[-1000:]
+                            truncation_warning = (
+                                f"\n\n... [SYSTEM WARNING: Output Truncated. Original size: {original_len:,} chars. "
+                                f"This is TOO MUCH DATA. Use filters, specific ranges, or targeted queries to get only what you need. "
+                                f"Do NOT request full output again.] ...\n\n"
+                            )
+                            tool_result = head + truncation_warning + tail
+                            print(f"   {Colors.YELLOW}⚠ Output truncated: {original_len:,} → {len(tool_result):,} chars{Colors.RESET}")
                         
                         # Format and display the result (truncate if needed)
                         formatted_result = format_tool_result(tool_result, func_name)
@@ -398,8 +1006,7 @@ class Agent:
                         # Track last tool used
                         last_tool_used = func_name
                         
-                        if exit_flag:
-                            should_exit = True
+                        # NOTE: Tool exit_flag is ignored - only 'exit' command ends the agent
                     
                     except Exception as e:
                         error_msg = f"Error executing {func_name}: {str(e)}"
@@ -415,60 +1022,26 @@ class Agent:
                 # Check if agent is stuck with repeated errors
                 if consecutive_errors >= 3:
                     print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
-                    print(f"{Colors.RED}⚠️  WARNING: Agent appears stuck with repeated errors{Colors.RESET}")
+                    print(f"{Colors.RED}[WARNING] Agent appears stuck with repeated errors{Colors.RESET}")
                     print(f"{Colors.RED}{'='*70}{Colors.RESET}")
                     print(f"{Colors.YELLOW}The agent has failed {consecutive_errors} consecutive tool calls.{Colors.RESET}")
                     print(f"{Colors.YELLOW}This suggests the current approach isn't working.{Colors.RESET}\n")
-                    print(f"{Colors.CYAN}💡 Agent needs to try a different strategy or explain the problem.{Colors.RESET}\n")
+                    print(f"{Colors.CYAN}[NOTE] Agent needs to try a different strategy.{Colors.RESET}\n")
                     
                     self._log_event("consecutive_errors_intervention", {
                         "step": step,
                         "consecutive_errors": consecutive_errors,
                         "recent_failed_tools": [tc["function_name"] for tc in tool_calls[-3:]]
                     })
-
-                    # Add intervention to force reflection
-                    intervention_msg = (
-                        f"CRITICAL: {consecutive_errors} consecutive failures. You are stuck in a loop.\\n\\n"
-                        "MANDATORY ACTIONS:\\n"
-                        "1. READ THE ERROR: What is the actual technical error message?\\n"
-                        "2. IDENTIFY ROOT CAUSE: Why is it failing? (dependency missing? syntax error? wrong approach?)\\n"
-                        "3. CHANGE YOUR APPROACH COMPLETELY: Do not retry the same failing action.\\n\\n"
-                        "SPECIFIC GUIDANCE:\\n"
-                        "- Tool creation syntax errors? Check JSON escaping - use single quotes in strings, avoid excessive backslashes\\n"
-                        "- Package installation fails? Try simpler pure-Python alternatives or use web_search for solutions\\n"
-                        "- Fundamental approach broken? Try a completely different method\\n\\n"
-                        "EXECUTE A DIFFERENT STRATEGY NOW. Do not repeat what just failed."
-                    )
-                    self.conversation.add_user_message(intervention_msg)
-                    consecutive_errors = 0  # Reset after intervention
-                
-                # If any tool requested exit, stop the loop
-                if should_exit:
-                    return True
+                    # Let agent naturally recover - no forced intervention message
                 
                 # Show what's next
                 if step == 1:
                     print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}")
-                    print(f"{Colors.CYAN}📊 Analyzing results...{Colors.RESET}")
+                    print(f"{Colors.CYAN}[ANALYSIS] Analyzing results...{Colors.RESET}")
                     print(f"{Colors.YELLOW}{'─'*70}{Colors.RESET}\n")
                 
-                # After first tool execution, if we got good results, push agent to respond
-                # by injecting a message asking to summarize findings
-                if step == 2 and tool_execution_count > 0:
-                    # Check if recent tool results look complete (not error-like)
-                    messages = self.conversation.get_messages()
-                    last_tool_result = None
-                    for msg in reversed(messages):
-                        if msg.get("role") == "tool":
-                            last_tool_result = msg.get("content", "")
-                            break
-                    
-                    # If we have a result that's not an error, nudge agent to respond
-                    if last_tool_result and "error" not in last_tool_result.lower():
-                        self.conversation.add_user_message(
-                            "Based on the tool results above, please provide a clear summary of what you found to answer my original request."
-                        )
+                # Let the agent naturally decide when to respond - no auto-injection of prompts
                 
                 # Loop continues - agent will reason about tool results and decide next action
                 continue
@@ -480,11 +1053,7 @@ class Agent:
                 # If response is still empty after all checks, retry
                 if not response_text:
                     print(f"{Colors.YELLOW}[Warning]: Response text is empty. Retrying...{Colors.RESET}\n")
-                    if step < max_steps:
-                        continue
-                    else:
-                        print(f"{Colors.RED}[Error]: No valid response received after {max_steps} attempts{Colors.RESET}")
-                        return False
+                    continue
                 
                 # Detect if the agent is outputting malformed tool syntax
                 malformed_patterns = [
@@ -500,23 +1069,17 @@ class Agent:
                 
                 if has_malformed:
                     print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
-                    print(f"{Colors.RED}❌ ERROR: Invalid Tool Calling Format Detected{Colors.RESET}")
+                    print(f"{Colors.RED}[ERROR] Invalid Tool Calling Format Detected{Colors.RESET}")
                     print(f"{Colors.RED}{'='*70}{Colors.RESET}")
                     print(f"{Colors.YELLOW}The agent emitted XML/JSON tool syntax instead of using the API properly.{Colors.RESET}")
                     print(f"{Colors.YELLOW}Recovery: Forcing a retry with a clear instruction to call tools via function-calling (no raw JSON/XML).{Colors.RESET}\n")
 
                     self._log_message("malformed_syntax_detected", response_text[:500], f"step_{step}malformed")
 
-                    # Inject guidance so the model fixes itself without asking the user
-                    recovery = (
-                        "CRITICAL ERROR: You used malformed tool syntax. Stop using XML/JSON tags.\n\n"
-                        "WRONG: <tool_call>read_file<tool_sep>{...}</tool_call>\n"
-                        "WRONG: {\"name\": \"read_file\", \"arguments\": {...}}\n"
-                        "WRONG: 'read_file(...)' as plain text\n\n"
-                        "RIGHT: Use the API's function calling mechanism. Just invoke the function.\n\n"
-                        "RETRY NOW: Execute the tool using function calling (no text, no XML, no JSON)."
+                    # Add a simple, calm recovery message
+                    self.conversation.add_user_message(
+                        "Use the API's function calling to execute tools. Do not write tool calls as text."
                     )
-                    self.conversation.add_user_message(recovery)
                     continue
 
                 # Detect plain-text pseudo tool calls like "read_file <path>" that should have been real calls
@@ -535,58 +1098,118 @@ class Agent:
                     # Circuit breaker: if we've had 3+ pseudo-calls, the agent is fundamentally confused
                     if pseudo_call_count >= 3:
                         print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
-                        print(f"{Colors.RED}❌ CIRCUIT BREAKER: Agent stuck in pseudo-call loop{Colors.RESET}")
+                        print(f"{Colors.RED}[CIRCUIT BREAKER] Agent stuck in pseudo-call loop{Colors.RESET}")
                         print(f"{Colors.RED}{'='*70}{Colors.RESET}")
                         print(f"{Colors.YELLOW}Agent has attempted to describe tool calls {pseudo_call_count} times without using function calling.{Colors.RESET}")
                         print(f"{Colors.YELLOW}The agent is fundamentally confused about how to invoke tools.{Colors.RESET}\n")
                         
-                        self._log_message("user", "CRITICAL: You are stuck in a loop describing tools instead of using them. I will create the tool you need. You just use it.", "circuit_breaker_intervention")
+                        self._log_message("user", "Pseudo-call loop detected. Agent should use function calling instead of describing tools.", "circuit_breaker_intervention")
                         
-                        # Force the agent to stop describing and acknowledge it will use function calling
-                        critical_intervention = (
-                            "CRITICAL INTERVENTION: You have attempted to describe tool calls 3 times without actually executing them.\n\n"
-                            "This is a fundamental misunderstanding of how to invoke tools.\n\n"
-                            "IMMEDIATE ACTION REQUIRED:\n"
-                            "You will NOW respond with ONLY the function call using the API's function calling mechanism.\n"
-                            "Do NOT write text. Do NOT describe what you're going to do.\n"
-                            "ONLY EXECUTE THE FUNCTION CALL.\n\n"
-                            "The API will handle the rest. You just need to invoke the function."
+                        # Add a calm recovery message
+                        self.conversation.add_user_message(
+                            "You've described tool calls as text several times. Please use function calling to execute the tools."
                         )
-                        self.conversation.add_user_message(critical_intervention)
                         continue
                     
-                    recovery_msg = (
-                        "ERROR: You described a tool call as text instead of executing it.\n\n"
-                        "What you did: Wrote text like 'read_file with file_path=...'\n"
-                        "What you MUST do: Use the API's function calling to execute the tool.\n\n"
-                        "STOP writing text. START using actual function calls.\n"
-                        "EXECUTE THE TOOL NOW (no text description, actual function call)."
+                    # Add a simple recovery message
+                    self.conversation.add_user_message(
+                        "You described a tool call as text. Please use function calling to execute it instead."
                     )
-                    self.conversation.add_user_message(recovery_msg)
-                    self._log_message("user", recovery_msg, "pseudo_call_recovery")
                     continue
                 else:
                     # Reset pseudo-call counter when we get a successful response
                     pseudo_call_count = 0
                 
+                # Detect if response appears to be hallucinating (completely off-topic content)
+                # This happens when model generates unrelated educational content, tutorials, code in wrong languages
+                hallucination_markers = [
+                    "예외처리", "エラー", "erreur",  # Non-English technical content
+                    "#include", "import java", "<?php", "module.exports",  # Wrong language code
+                    "Gemfile", "Rakefile", "Cargo.toml", "Package.swift",  # Ruby/Rust/Swift configs
+                    "## 1.", "## 2.", "## 3.",  # Numbered markdown headers (tutorials)
+                    "Here is a breakdown", "Here's a breakdown",  # Tutorial language
+                    "Let me explain", "To understand",  # Educational phrasing
+                    "data mining", "DATA mining",  # Random technical topics
+                    "fifa", "FIFA",  # Sports hallucinations
+                    "08-16-20", "10:10 PM",  # Random timestamps/dates
+                ]
+                
+                # Check for gibberish - many short words, broken sentences
+                words = response_text.split()
+                short_word_ratio = sum(1 for w in words if len(w) <= 3) / max(len(words), 1)
+                has_gibberish = (
+                    len(words) > 20 and 
+                    short_word_ratio > 0.5 and  # More than 50% short words
+                    response_text.count('|') > 2  # Random pipe characters
+                )
+                
+                # Check for long educational/tutorial responses that don't relate to tools
+                is_tutorial = (
+                    len(response_text) > 400 and 
+                    response_text.count('#') > 3 and  # Multiple markdown headers
+                    response_text.count('\n') > 8     # Many line breaks
+                )
+                
+                is_hallucinating = (
+                    any(marker in response_text for marker in hallucination_markers) or
+                    has_gibberish or  # Gibberish detection
+                    (is_tutorial and "tool" not in response_text.lower()[:200])  # Tutorial without tool mention
+                )
+                
+                if is_hallucinating:
+                    print(f"\n{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.RED}[HALLUCINATION] Agent generated off-topic content{Colors.RESET}")
+                    print(f"{Colors.RED}{'='*70}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}Agent response appears unrelated to the task. Requesting refocus...{Colors.RESET}\n")
+                    
+                    self._log_message("hallucination", response_text[:500], f"step_{step}")
+                    
+                    # Request agent to refocus on the actual task
+                    self.conversation.add_user_message(
+                        "Stop. You are generating unrelated content. Focus on the user's request and use tools to complete it."
+                    )
+                    continue
+                
                 self.conversation.add_assistant_message(response_text)
                 self._log_message("assistant", response_text, f"step_{step}_final")
                 
+                # CHECK PLAN STATUS: If plan is completed, stop immediately
+                if self.agent_state.get("status") == "completed":
+                    print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
+                    print(f"{Colors.GREEN}✅ Plan Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
+                    print(f"{Colors.GREEN}{'─'*70}{Colors.RESET}\n")
+                    return False  # Return control to user
+                
+                # CHECK PLAN PROGRESS: If all plan steps are done, stop
+                if self.agent_state.get("plan") and self.agent_state.get("current_step", 0) >= len(self.agent_state["plan"]):
+                    print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
+                    print(f"{Colors.GREEN}✅ All Plan Steps Done: {tool_execution_count} tool(s) executed{Colors.RESET}")
+                    print(f"{Colors.GREEN}{'─'*70}{Colors.RESET}\n")
+                    self.agent_state["status"] = "completed"
+                    return False  # Return control to user
+                
                 # Check if the response indicates the agent wants to continue (more tools needed)
+                # BUT only if we still have plan steps remaining
                 continuation_indicators = [
                     "i will", "i'll", "let me", "i need to", "next", "now i", "first", "then",
                     "i should", "i can", "i'm going to", "step ", "after that"
                 ]
                 wants_to_continue = any(indicator in response_text.lower() for indicator in continuation_indicators)
                 
-                # If agent seems to want to continue and we haven't hit max steps, let it continue
-                if wants_to_continue and step < max_steps:
+                # Only continue if agent wants to AND there's still work in the plan
+                has_remaining_plan_steps = (
+                    self.agent_state.get("plan") and 
+                    self.agent_state.get("current_step", 0) < len(self.agent_state["plan"])
+                )
+                
+                if wants_to_continue and has_remaining_plan_steps:
+                    plan_info = f" (Plan: {self.agent_state['current_step'] + 1}/{len(self.agent_state['plan'])})"
                     print(f"\n{Colors.CYAN}{'─'*70}{Colors.RESET}")
-                    print(f"{Colors.CYAN}💭 Agent reasoning... (Step {step}/{max_steps}){Colors.RESET}")
+                    print(f"{Colors.CYAN}[THINKING] Agent reasoning... (Step {step}{plan_info}){Colors.RESET}")
                     print(f"{Colors.CYAN}{'─'*70}{Colors.RESET}\n")
                     continue  # Let the agent continue to next step
                 
-                # Otherwise, treat as completion
+                # Otherwise, task is done - return control to user
                 if tool_execution_count > 0:
                     print(f"\n{Colors.GREEN}{'─'*70}{Colors.RESET}")
                     print(f"{Colors.GREEN}✅ Task Complete: {tool_execution_count} tool(s) executed across {step} step(s){Colors.RESET}")
@@ -597,13 +1220,13 @@ class Agent:
                         "tool_count": tool_execution_count,
                         "response_length": len(response_text)
                     })
-                return False
+                return False  # Return control to user
         
-        # Max steps reached
-        print(f"{Colors.YELLOW}[Warning]: Max agent steps reached ({max_steps}). Task may be incomplete.{Colors.RESET}")
-        self._log_event("max_steps_reached", {
-            "max_steps": max_steps,
-            "tools_executed": tool_execution_count,
-            "final_messages_count": len(self.conversation.get_messages())
-        })
+        # This point should not be reached since the while loop is now infinite
+        # until the agent completes or user stops it
+        return False
+
+    def _continue_processing(self, headers: dict, additional_steps: int, prior_tool_count: int) -> bool:
+        """DEPRECATED: With the new plan-based loop, this is no longer needed.
+        The main while loop now handles continuation internally with safety thresholds."""
         return False

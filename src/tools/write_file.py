@@ -47,6 +47,34 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
     
     try:
         path = Path(file_path)
+        
+        # Check for "fixed_*" style naming that suggests avoiding fixing the original file
+        stem = path.stem.lower()
+        bad_prefixes = ('fixed_', 'fix_', 'new_', 'improved_', 'better_', 'working_', 'correct_', 'updated_')
+        bad_suffixes = ('_fixed', '_fix', '_new', '_improved', '_better', '_working', '_correct', '_updated', '_v2', '_v3', '_v4', '_final', '_2', '_3')
+        
+        warning = ""
+        original_name = None
+        
+        for prefix in bad_prefixes:
+            if stem.startswith(prefix):
+                original_name = stem[len(prefix):]
+                break
+        
+        if not original_name:
+            for suffix in bad_suffixes:
+                if stem.endswith(suffix):
+                    original_name = stem[:-len(suffix)]
+                    break
+        
+        if original_name and mode == "write":
+            original_path = path.parent / f"{original_name}{path.suffix}"
+            warning = (
+                f"\n⚠️ WARNING: Filename '{path.name}' looks like a 'fixed' version of '{original_name}{path.suffix}'.\n"
+                f"If '{original_path}' has errors, you should FIX IT directly instead of creating variants.\n"
+                f"Use: write_file('{original_path}', fixed_content)\n"
+            )
+        
         abs_path = path.resolve()
         dangerous_dirs = [Path("/etc"), Path("/sys"), Path("/proc"), Path("C:\\Windows")]
         for danger in dangerous_dirs:
@@ -60,7 +88,7 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
         
         if mode == "write":
             path.write_text(content, encoding='utf-8')
-            return f"Successfully wrote {len(content)} characters to '{file_path}'", False
+            return f"Successfully wrote {len(content)} characters to '{file_path}'{warning}", False
         
         if mode == "append":
             current = path.read_text(encoding='utf-8') if path.exists() else ""
@@ -68,7 +96,7 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
                 current += '\n'
             new_content = current + content
             path.write_text(new_content, encoding='utf-8')
-            return f"Successfully appended {len(content)} characters to '{file_path}'", False
+            return f"Successfully appended {len(content)} characters to '{file_path}'{warning}", False
         
         if mode == "prepend":
             current = path.read_text(encoding='utf-8') if path.exists() else ""
@@ -76,7 +104,7 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
                 content += '\n'
             new_content = content + current
             path.write_text(new_content, encoding='utf-8')
-            return f"Successfully prepended {len(content)} characters to '{file_path}'", False
+            return f"Successfully prepended {len(content)} characters to '{file_path}'{warning}", False
         
         if mode == "insert_after_line":
             if not path.exists():
@@ -87,7 +115,7 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
             content_lines = content.split('\n')
             lines = lines[:line_number] + content_lines + lines[line_number:]
             path.write_text('\n'.join(lines), encoding='utf-8')
-            return f"Successfully inserted {len(content_lines)} line(s) after line {line_number} in '{file_path}'", False
+            return f"Successfully inserted {len(content_lines)} line(s) after line {line_number} in '{file_path}'{warning}", False
         
         if mode == "replace_lines":
             if not path.exists():
@@ -99,7 +127,7 @@ def execute(args: Dict[str, object]) -> Tuple[str, bool]:
             content_lines = content.split('\n')
             lines = lines[:line_number - 1] + content_lines + lines[end_line:]
             path.write_text('\n'.join(lines), encoding='utf-8')
-            return f"Successfully replaced {num_lines} line(s) starting at line {line_number} in '{file_path}'", False
+            return f"Successfully replaced {num_lines} line(s) starting at line {line_number} in '{file_path}'{warning}", False
         
         return f"Error: Unknown write mode '{mode}'", False
     

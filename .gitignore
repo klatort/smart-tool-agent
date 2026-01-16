@@ -13,6 +13,18 @@ venv/
 src/tools/auto/*.py
 !src/tools/auto/__init__.py
 
+# Logs
+*.log
+
+# Agent-generated output files
+output/
+data/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
 # OS
 .DS_Store
 Thumbs.db
