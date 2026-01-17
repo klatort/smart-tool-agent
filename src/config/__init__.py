@@ -1,4 +1,18 @@
 """Configuration module for Living CLI Agent"""
-from .settings import API_KEY, API_URL, MODEL_ID, Colors
+from .settings import (
+    API_KEY, API_URL, MODEL_ID, Colors,
+    AGENT_SAFETY_THRESHOLD,
+    AGENT_CHECK_INTERVAL,
+    AGENT_CONSOLIDATION_TURNS,
+    AGENT_CONSOLIDATION_MESSAGES,
+    AGENT_CONSOLIDATION_CONTEXT_SIZE
+)
 
-__all__ = ['API_KEY', 'API_URL', 'MODEL_ID', 'Colors']
+__all__ = [
+    'API_KEY', 'API_URL', 'MODEL_ID', 'Colors',
+    'AGENT_SAFETY_THRESHOLD',
+    'AGENT_CHECK_INTERVAL', 
+    'AGENT_CONSOLIDATION_TURNS',
+    'AGENT_CONSOLIDATION_MESSAGES',
+    'AGENT_CONSOLIDATION_CONTEXT_SIZE'
+]

@@ -6,6 +6,13 @@ import sys
 import io
 from typing import Tuple
 from src.config import API_KEY, API_URL, MODEL_ID, Colors
+from src.config import (
+    AGENT_SAFETY_THRESHOLD, 
+    AGENT_CHECK_INTERVAL,
+    AGENT_CONSOLIDATION_TURNS,
+    AGENT_CONSOLIDATION_MESSAGES,
+    AGENT_CONSOLIDATION_CONTEXT_SIZE
+)
 from src.managers import ConversationManager, ToolManager
 from src.parsers import StreamParser
 from src.utils import format_tool_result, truncate_text
@@ -291,9 +298,9 @@ class Agent:
         
         # Memory consolidation tracking
         self.turn_count = 0
-        self.consolidation_threshold = 10  # Consolidate after this many turns
-        self.message_count_threshold = 15  # Also consolidate if message count exceeds this
-        self.context_size_threshold = 50000  # Also consolidate if estimated context size exceeds this (chars)
+        self.consolidation_threshold = AGENT_CONSOLIDATION_TURNS
+        self.message_count_threshold = AGENT_CONSOLIDATION_MESSAGES
+        self.context_size_threshold = AGENT_CONSOLIDATION_CONTEXT_SIZE
 
     def _summarize_context(self) -> str:
         """
@@ -608,7 +615,8 @@ class Agent:
         # Agentic loop - continues until plan is complete or agent decides to stop
         # No fixed max_steps - the plan determines how many steps are needed
         # Safety threshold triggers a user confirmation to prevent runaway loops
-        safety_threshold = 20  # Ask user to confirm if we exceed this many steps
+        safety_threshold = AGENT_SAFETY_THRESHOLD  # 0 or negative = disabled
+        check_interval = AGENT_CHECK_INTERVAL
         step = 0
         tool_execution_count = 0  # Track total tools executed
         last_tool_signature = None  # Track (tool_name, args) to detect loops
@@ -629,7 +637,8 @@ class Agent:
                 self.agent_state["status"] = "completed"
                 return False
             
-            if step > safety_threshold and step % 10 == 1:  # Check every 10 steps after threshold
+            # Safety check only if threshold is enabled (> 0)
+            if safety_threshold > 0 and step > safety_threshold and (step - safety_threshold - 1) % check_interval == 0:
                 print(f"\n{Colors.YELLOW}{'='*70}{Colors.RESET}")
                 print(f"{Colors.YELLOW}[PAUSE] Agent has run {step-1} steps.{Colors.RESET}")
                 plan_len = len(self.agent_state.get('plan', []))

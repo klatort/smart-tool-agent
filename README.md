@@ -40,6 +40,11 @@ Create a `.env` file in the root directory:
 API_KEY=your_api_key_here
 API_URL=https://your-api-endpoint/v2/chat/completions
 MODEL_ID=your-model-id
+
+# Optional agent settings
+AGENT_SAFETY_THRESHOLD=20    # Steps before asking to continue (0 = disabled/infinite)
+AGENT_CHECK_INTERVAL=10      # How often to ask after threshold exceeded
+AGENT_CONSOLIDATION_TURNS=10 # Turns before memory consolidation
 ```
 
 ### 4. Run the agent
