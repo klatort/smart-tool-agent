@@ -19,6 +19,8 @@ from .planning import (
     MARK_STEP_COMPLETE_DEF, mark_step_complete as mark_step_complete_execute,
     set_agent_state, get_agent_state
 )
+from .run_command import TOOL_DEF as RUN_COMMAND_DEF, execute as run_command_execute
+from .parallel_tasks import TOOL_DEF as PARALLEL_TASKS_DEF, execute as parallel_tasks_execute
 
 TOOLS_DIR = Path(__file__).parent
 AUTO_DIR = TOOLS_DIR / "auto"
@@ -78,6 +80,9 @@ def get_tools() -> List[Dict[str, Any]]:
         CREATE_PLAN_DEF,
         UPDATE_PLAN_DEF,
         MARK_STEP_COMPLETE_DEF,
+        # Execution tools
+        RUN_COMMAND_DEF,
+        PARALLEL_TASKS_DEF,
     ]
     auto_defs, _ = _load_auto_tools()
     return base + auto_defs
@@ -98,6 +103,9 @@ def get_tool_functions() -> Dict[str, Callable]:
         "create_plan": create_plan_execute,
         "update_plan": update_plan_execute,
         "mark_step_complete": mark_step_complete_execute,
+        # Execution tools
+        "run_command": run_command_execute,
+        "parallel_tasks": parallel_tasks_execute,
     }
     _, auto_funcs = _load_auto_tools()
     base.update(auto_funcs)

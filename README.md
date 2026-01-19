@@ -76,6 +76,8 @@ python main.py
 - `web_search` - DuckDuckGo search
 - `install_package` - pip package installation
 - `create_plan`, `mark_step_complete`, `task_complete` - Planning
+- `run_command` - Shell execution with timeout and server detection
+- `parallel_tasks` - Execute multiple independent tasks concurrently
 
 ## License
 
