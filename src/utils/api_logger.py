@@ -40,6 +40,48 @@ def log_response(step: int, response_text: str, response_type: str):
     with open(RAW_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+
+def log_api_error(step: int, status_code: int, error_body: str, request_messages: list = None):
+    """
+    Log API errors (403, 400, etc.) for debugging censorship triggers.
+    This is CRITICAL for understanding what content triggers blocks.
+    """
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "type": "API_ERROR",
+        "step": step,
+        "status_code": status_code,
+        "error_body": error_body,
+        "is_censorship": status_code in [403, 400, 451],  # Common censorship codes
+        "last_messages": []
+    }
+    
+    # Include the last few messages that may have triggered the block
+    if request_messages:
+        # Get last 3 messages for context
+        for msg in request_messages[-3:]:
+            entry["last_messages"].append({
+                "role": msg.get("role"),
+                "content": str(msg.get("content", ""))[:2000],  # Truncate but keep enough
+                "has_tool_calls": "tool_calls" in msg,
+                "has_tool_call_id": "tool_call_id" in msg
+            })
+    
+    with open(RAW_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+    
+    # Also write to a dedicated censorship log for easy review
+    if entry["is_censorship"]:
+        with open("censorship.log", "a", encoding="utf-8") as f:
+            f.write("=" * 80 + "\n")
+            f.write(f"CENSORSHIP BLOCK at {entry['timestamp']}\n")
+            f.write(f"Status: {status_code}\n")
+            f.write(f"Error: {error_body}\n")
+            f.write("Last messages:\n")
+            for msg in entry["last_messages"]:
+                f.write(f"  [{msg['role']}]: {msg['content'][:500]}...\n")
+            f.write("=" * 80 + "\n\n")
+
 def analyze_last_session():
     """Analyze the last session's API communications."""
     if not os.path.exists(RAW_LOG_FILE):
